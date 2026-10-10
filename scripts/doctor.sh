@@ -1192,6 +1192,171 @@ fi
 unset _CH_LAST_LINE
 echo ""
 
+# ── Windows kernel Token leak (#1011) ───────────────────────────────────────
+#
+# On Windows 11 25H2, a win32kfull.sys bug leaks one kernel Token object per
+# console-attached process start, never freed until a real Restart (Fast
+# Startup's Shut down keeps the leaked state). This plugin's hooks are a
+# heavy process creator, so an affected host accumulates leaked objects every
+# session. Reporter-confirmed on build 26200.9457; microsoft/terminal#20781
+# has since confirmed it on 26300.9550 too (both OPEN, no fix/KB yet -- see
+# docs/windows.md). The confirmed workaround -- setting the LIVE foreground
+# lock timeout to 0 -- has a real trade-off (apps can steal foreground focus
+# without asking) and resets at every logon, so it is an opt-in system
+# change a human decides on. This plugin must never apply it itself: WARN
+# only, a pointer to the docs, and the VERDICT is deliberately left alone,
+# same as log rotation and case divergence above -- capture itself is
+# entirely unaffected either way.
+#
+# #1015 review: this check used to read three env-var knobs
+# (_REMEMBER_DOCTOR_FORCE_WINDOWS / _REMEMBER_DOCTOR_WIN_BUILD_OVERRIDE /
+# _REMEMBER_DOCTOR_FGLOCK_TIMEOUT_OVERRIDE) unconditionally, which let a
+# real user SUPPRESS a genuine WARN by setting any one of them. There is no
+# such knob now -- tests/test_doctor_windows_fglock_1011.py instead sets
+# OS=Windows_NT (the same real signal _remember_doctor_is_windows() already
+# reads below) and puts a stub powershell.exe on PATH, matching how
+# tests/test_windows_hidden_detach_1002.py stubs wscript.exe.
+_remember_doctor_is_windows() {
+    local sys
+    sys="${OS:-}"
+    [ "$sys" = "Windows_NT" ] && return 0
+    sys="$(uname -s 2>/dev/null)"
+    [ "${sys#MINGW}" != "$sys" ] || [ "${sys#MSYS}" != "$sys" ] \
+        || [ "${sys#CYGWIN}" != "$sys" ]
+}
+
+# bounded by a plain bash watchdog (sleep + kill -9); missing powershell,
+# a non-zero exit, or a timeout all print nothing on purpose (#1002). The
+# bound defaults to 5s but is overridable per call ($2) -- #1015 review
+# round 4: on real windows-latest CI, a diagnostic run of ONLY the timeout
+# probe below (which runs an Add-Type C# compile; see
+# tests/test_windows_real_fglock_1011.py) measured elapsed=10.81s,
+# returncode=0, empty stdout/stderr -- more than double the 5s this
+# function used to hard-code, with no error of any kind reported. The
+# build probe above never needs Add-Type and stays fast on the same host,
+# so it keeps the 5s default; only the Add-Type-using timeout probe asks
+# for a wider one. doctor.sh is not a hot path, so a wider bound here is a
+# fair trade against a false "could not determine" WARN.
+_remember_doctor_run_powershell_file() {
+    local _ps_bin="" _ps_file="$1" _ps_timeout="${2:-5}" _ps_out_file _ps_pid _ps_watchdog _ps_rc _ps_out
+
+if command -v powershell.exe >/dev/null 2>&1; then
+        _ps_bin="powershell.exe"
+    elif command -v powershell >/dev/null 2>&1; then
+        _ps_bin="powershell"
+    else
+        return 1
+    fi
+    _ps_out_file=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-out.XXXXXX") || return 1
+
+    # review finding: powershell.exe is a native Windows binary and does not
+    # reliably accept an MSYS/Cygwin POSIX path for -File, the same hazard
+    # lib-detach.sh's own wscript.exe launcher already guards with cygpath
+    # -w. Convert when cygpath is on PATH; fall back to the POSIX path
+    # otherwise rather than refusing outright -- a conversion that cannot
+    # run is not reason enough to give up on a check that might work anyway,
+    # and either way an unresolvable path still degrades to the "could not
+    # determine" WARN above, never a false OK.
+    if command -v cygpath >/dev/null 2>&1; then
+        _ps_file="$(cygpath -w "$_ps_file" 2>/dev/null)" || _ps_file="$1"
+    fi
+
+"$_ps_bin" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$_ps_file" >"$_ps_out_file" 2>/dev/null &
+    _ps_pid=$!
+
+( sleep "$_ps_timeout"; kill -9 "$_ps_pid" 2>/dev/null ) &
+    _ps_watchdog=$!
+    wait "$_ps_pid" 2>/dev/null
+    _ps_rc=$?
+    kill "$_ps_watchdog" 2>/dev/null
+    wait "$_ps_watchdog" 2>/dev/null
+
+_ps_out=$(tr -d '\r' <"$_ps_out_file" 2>/dev/null | tr -d '[:space:]')
+    rm -f "$_ps_out_file"
+    if [ "$_ps_rc" -ne 0 ] || [ -z "$_ps_out" ]; then
+        return 1
+    fi
+    printf '%s' "$_ps_out"
+}
+
+# live Windows build number via [Environment]::OSVersion.Version.Build.
+_remember_doctor_fglock_build() {
+    local _ps_script
+    _ps_script=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-build.XXXXXX") || return 1
+    # review finding: if this mv fails, _ps_script keeps its extension-less
+    # name, powershell -File (which requires .ps1) then errors, and the
+    # caller reports its own "could not determine" WARN -- a safe but
+    # otherwise-undocumented degrade, named here so a future "always WARNs
+    # could-not-check on this host" report has somewhere to start looking.
+    mv "$_ps_script" "${_ps_script}.ps1" 2>/dev/null && _ps_script="${_ps_script}.ps1"
+    printf '%s\n' '[Environment]::OSVersion.Version.Build' >"$_ps_script"
+    _remember_doctor_run_powershell_file "$_ps_script"
+    rm -f "$_ps_script"
+}
+
+# live SPI_GETFOREGROUNDLOCKTIMEOUT read.
+_remember_doctor_fglock_timeout() {
+    local _ps_script _dq
+    _dq='"'
+    _ps_script=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-timeout.XXXXXX") || return 1
+    # same mv-may-fail degrade as _remember_doctor_fglock_build above.
+    mv "$_ps_script" "${_ps_script}.ps1" 2>/dev/null && _ps_script="${_ps_script}.ps1"
+
+printf '%s\n' "Add-Type -Name RememberFg -Namespace RememberWin -MemberDefinition '[DllImport(${_dq}user32.dll${_dq})] public static extern bool SystemParametersInfo(uint a, uint b, out uint c, uint d);'" >"$_ps_script"
+    printf '%s\n' '$fg = 0' >>"$_ps_script"
+
+printf '%s\n' '[RememberWin.RememberFg]::SystemParametersInfo(0x2000, 0, [ref]$fg, 0) | Out-Null' >>"$_ps_script"
+    printf '%s\n' 'Write-Output $fg' >>"$_ps_script"
+    # 20s, not the 5s default -- this probe's Add-Type C# compile was PROVEN
+    # (see the comment on _remember_doctor_run_powershell_file above) to
+    # exceed 5s on real windows-latest CI.
+    _remember_doctor_run_powershell_file "$_ps_script" 20
+    rm -f "$_ps_script"
+}
+
+_FGLOCK_IS_WIN=0
+if _remember_doctor_is_windows; then
+    _FGLOCK_IS_WIN=1
+fi
+
+if [ "$_FGLOCK_IS_WIN" -eq 1 ]; then
+    echo "-- Windows foreground-lock check (#1011) --"
+    _FGLOCK_BUILD=$(_remember_doctor_fglock_build)
+
+    if [ -z "$_FGLOCK_BUILD" ] || [[ "$_FGLOCK_BUILD" == *[!0-9]* ]]; then
+        echo "WARN Could not determine the Windows build number (PowerShell unavailable,"
+        echo "     slow, or returned something unexpected) -- the #1011 kernel Token-leak"
+        echo "     check could not run. See docs/windows.md."
+    elif [ "$_FGLOCK_BUILD" -lt 26200 ]; then
+        echo "OK   Windows build $_FGLOCK_BUILD is not known-affected by #1011's kernel"
+        echo "     Token leak (confirmed from build 26200)"
+    else
+
+_FGLOCK_TIMEOUT=$(_remember_doctor_fglock_timeout)
+
+        if [ -z "$_FGLOCK_TIMEOUT" ] || [[ "$_FGLOCK_TIMEOUT" == *[!0-9]* ]]; then
+            echo "WARN Windows build $_FGLOCK_BUILD is known-affected by #1011's kernel Token"
+            echo "     leak, but the live foreground lock timeout could not be read"
+            echo "     (PowerShell unavailable, slow, or returned something unexpected) --"
+            echo "     cannot tell whether the opt-in workaround is applied. See docs/windows.md."
+        elif [ "$_FGLOCK_TIMEOUT" = "0" ]; then
+            echo "OK   Windows build $_FGLOCK_BUILD is known-affected by #1011's kernel Token"
+            echo "     leak, but the foreground lock timeout is already 0 (opt-in workaround applied)"
+        else
+            echo "WARN Windows build $_FGLOCK_BUILD is known-affected by #1011's kernel Token leak"
+            echo "     (one win32kfull.sys Token object per console-attached process start,"
+            echo "     freed only by a Restart) -- foreground lock timeout is $_FGLOCK_TIMEOUT, not"
+            echo "     0. This plugin's hooks spawn many such processes. An opt-in workaround,"
+            echo "     with a real trade-off, is in docs/windows.md; this plugin never applies"
+            echo "     it on its own."
+        fi
+        unset _FGLOCK_TIMEOUT
+    fi
+    unset _FGLOCK_BUILD
+fi
+unset _FGLOCK_IS_WIN
+echo ""
+
 # ── Verdict ──────────────────────────────────────────────────────────────────
 # Order matters more than it looks. Every one of these ends with "capture is
 # not running", but they need different actions, and the generic
