@@ -1936,7 +1936,24 @@ NOTICE_TTL=3600
 if [ -n "$STDIN_TRANSCRIPT_PATH" ]; then
     LATEST_JSONL="$STDIN_TRANSCRIPT_PATH"
 else
-    LATEST_JSONL=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)
+    LATEST_JSONL=""
+    _ptl_jsonl_tie=false
+    for _ptl_jsonl in "$SESSION_DIR"/*.jsonl; do
+        [ -e "$_ptl_jsonl" ] || continue
+        if [ -z "$LATEST_JSONL" ]; then
+            LATEST_JSONL="$_ptl_jsonl"
+        elif [ "$_ptl_jsonl" -nt "$LATEST_JSONL" ]; then
+            LATEST_JSONL="$_ptl_jsonl"
+            _ptl_jsonl_tie=false
+        elif ! [ "$LATEST_JSONL" -nt "$_ptl_jsonl" ]; then
+            _ptl_jsonl_tie=true
+        fi
+    done
+    unset _ptl_jsonl
+    if [ "$_ptl_jsonl_tie" = true ]; then
+        LATEST_JSONL=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)
+    fi
+    unset _ptl_jsonl_tie
 fi
 if [ -z "$LATEST_JSONL" ]; then
     NOTICE_MARKER="$REMEMBER_DIR/tmp/no-transcript-notice"
@@ -1970,8 +1987,6 @@ else
     [ -n "$STDIN_SESSION_ID" ] && log "hook" "post-tool: stdin session $STDIN_SESSION_ID has no transcript in $SESSION_DIR -- falling back to newest"
 fi
 
-CURRENT_LINES=$(wc -l < "$TRANSCRIPT" 2>/dev/null)
-CURRENT_LINES=$(( CURRENT_LINES + 0 ))
 if [ "$STDIN_SESSION_ID_TRUSTED" = true ]; then
     SESSION_ID="$STDIN_SESSION_ID"
 else
@@ -1993,9 +2008,94 @@ if [ -d "$REMEMBER_DIR/tmp/capture-alive.d" ] \
         : > "$REMEMBER_DIR/tmp/capture-alive.d/$SESSION_ID" 2>/dev/null || true
     fi
 fi
-if printf '%s' "$SESSION_ID" > "$REMEMBER_DIR/tmp/capture-alive.$$" 2>/dev/null; then
-    mv -f "$REMEMBER_DIR/tmp/capture-alive.$$" "$REMEMBER_DIR/tmp/capture-alive" 2>/dev/null \
-        || rm -f "$REMEMBER_DIR/tmp/capture-alive.$$" 2>/dev/null || true
+_ptl_capture_marker="$REMEMBER_DIR/tmp/capture-alive"
+_ptl_capture_current=""
+if [ -f "$_ptl_capture_marker" ]; then
+    read -r _ptl_capture_current < "$_ptl_capture_marker" 2>/dev/null
+fi
+if [ "$_ptl_capture_current" != "$SESSION_ID" ] || [ -z "$SESSION_ID" ]; then
+    if printf '%s' "$SESSION_ID" > "$_ptl_capture_marker.$$" 2>/dev/null; then
+        mv -f "$_ptl_capture_marker.$$" "$_ptl_capture_marker" 2>/dev/null \
+            || rm -f "$_ptl_capture_marker.$$" 2>/dev/null || true
+    fi
+else
+    printf '%s' "$SESSION_ID" 1<> "$_ptl_capture_marker" 2>/dev/null || true
+fi
+unset _ptl_capture_marker _ptl_capture_current
+
+IN_COOLDOWN=false
+COOLDOWN_MARKER="$REMEMBER_DIR/tmp/last-save-ts"
+if [ -f "$COOLDOWN_MARKER" ]; then
+    LAST_TS=0
+    read -r LAST_TS < "$COOLDOWN_MARKER" 2>/dev/null
+    if [ -z "$LAST_TS" ] || [ "${LAST_TS#*[!0-9]}" != "$LAST_TS" ]; then LAST_TS=0; fi
+    SAVE_COOLDOWN="${REMEMBER_SAVE_COOLDOWN:-120}"
+    _ELAPSED=$(( $(_remember_date +%s) - 10#$LAST_TS ))
+    [ "$_ELAPSED" -ge 0 ] && [ "$_ELAPSED" -lt "$SAVE_COOLDOWN" ] && IN_COOLDOWN=true
+fi
+
+if [ "$IN_COOLDOWN" = false ]; then
+_pt_scan_lines() {
+    local LC_ALL=C
+    local _off="$1" _lines="$2" _file="$3"
+    local _start=1 _nl=$'\n'
+    [ "$_off" -gt 0 ] && _start="$_off"
+    local _chunk
+    _chunk=$(tail -c +"$_start" "$_file" 2>/dev/null; printf 'X')
+    _chunk=${_chunk%X}
+    if [ "$_off" -gt 0 ]; then
+        local _first=${_chunk:0:1}
+        if [ -z "$_chunk" ] || [ "$_first" != "$_nl" ]; then
+            _pt_scan_lines 0 0 "$_file"
+            return
+        fi
+        _chunk=${_chunk:1}
+    fi
+    local _partial=${_chunk##*$'\n'}
+    local _complete=${_chunk%"$_partial"}
+    local _nl_count
+    _nl_count=$(printf '%s' "$_complete" | wc -l)
+    _nl_count=${_nl_count//[^0-9]}
+    [ -z "$_nl_count" ] && _nl_count=0
+    printf '%s %s\n' "$(( _off + ${#_complete} ))" "$(( _lines + _nl_count ))"
+}
+
+_SCAN_NAME="${TRANSCRIPT##*/}"
+_SCAN_NAME="${_SCAN_NAME%.jsonl}"
+if [ -z "${_SCAN_NAME#.}" ] || [ -z "${_SCAN_NAME#..}" ] \
+    || [ "${_SCAN_NAME#-}" != "$_SCAN_NAME" ] \
+    || [[ "$_SCAN_NAME" == *[!A-Za-z0-9._-]* ]]; then
+    _SCAN_NAME=""
+fi
+
+_SCAN_OFFSET=0
+_SCAN_LINES=0
+if [ -n "$_SCAN_NAME" ]; then
+    SCAN_SIDECAR="$REMEMBER_DIR/tmp/transcript-scan.$_SCAN_NAME"
+    if [ -f "$SCAN_SIDECAR" ]; then
+        _SCAN_RAW_OFFSET=""
+        _SCAN_RAW_LINES=""
+        read -r _SCAN_RAW_OFFSET _SCAN_RAW_LINES < "$SCAN_SIDECAR" 2>/dev/null
+        if [ -z "$_SCAN_RAW_OFFSET" ] || [[ "$_SCAN_RAW_OFFSET" == *[!0-9]* ]] \
+            || [ -z "$_SCAN_RAW_LINES" ] || [[ "$_SCAN_RAW_LINES" == *[!0-9]* ]]; then
+            _SCAN_RAW_OFFSET=0
+            _SCAN_RAW_LINES=0
+        fi
+        _SCAN_OFFSET=$((10#$_SCAN_RAW_OFFSET))
+        _SCAN_LINES=$((10#$_SCAN_RAW_LINES))
+    fi
+else
+    SCAN_SIDECAR=""
+fi
+
+_SCAN_RESULT=$(_pt_scan_lines "$_SCAN_OFFSET" "$_SCAN_LINES" "$TRANSCRIPT")
+_SCAN_NEW_OFFSET=${_SCAN_RESULT%% *}
+CURRENT_LINES=${_SCAN_RESULT##* }
+CURRENT_LINES=$(( CURRENT_LINES + 0 ))
+
+if [ -n "$SCAN_SIDECAR" ]; then
+    printf '%s %s\n' "$_SCAN_NEW_OFFSET" "$CURRENT_LINES" > "$SCAN_SIDECAR" 2>/dev/null
+fi
 fi
 
 SIDECAR=""
@@ -2014,7 +2114,7 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
     if [ -z "$_SIDECAR_LINE" ] || [[ "$_SIDECAR_LINE" == *[!0-9]* ]]; then
         log "hook" "WARNING: sidecar $SIDECAR held a non-numeric value ($_SIDECAR_LINE) -- disagrees with last-save.json, falling back to read-position"
     else
-        if [ "$((10#$_SIDECAR_LINE))" -gt "$CURRENT_LINES" ]; then
+        if [ "$IN_COOLDOWN" = false ] && [ "$((10#$_SIDECAR_LINE))" -gt "$CURRENT_LINES" ]; then
             log "hook" "WARNING: sidecar $SIDECAR reports position $_SIDECAR_LINE, past this run's own $CURRENT_LINES transcript lines -- disagrees with last-save.json, falling back to read-position"
         else
             _LAST_SAVE_STATE="absent"
@@ -2026,11 +2126,10 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
                     _LAST_SAVE_STATE="unreadable"
                 fi
             fi
-            _SESSIONS_SCOPE=${_LAST_SAVE_CONTENT#*"$_pt_dq"sessions"$_pt_dq"}
-            if [ "$_SESSIONS_SCOPE" != "$_LAST_SAVE_CONTENT" ]; then
-                _SESSIONS_SCOPE="${_SESSIONS_SCOPE%%\}*}"
-            else
-                _SESSIONS_SCOPE=""
+            _SESSIONS_SCOPE=""
+            _PT_SESSIONS_RE="$_pt_dq"'sessions'"$_pt_dq"'([^}]*)'
+            if [[ "$_LAST_SAVE_CONTENT" =~ $_PT_SESSIONS_RE ]]; then
+                _SESSIONS_SCOPE="${BASH_REMATCH[1]}"
             fi
             if [[ "$_SESSIONS_SCOPE" == *"$_pt_dq"$SESSION_ID"$_pt_dq":* ]]; then
                 LAST_LINE=$((10#$_SIDECAR_LINE))
@@ -2054,17 +2153,6 @@ fi
 
 DELTA=$((CURRENT_LINES - 10#$LAST_LINE))
 SAVE_TRIGGERED=""
-
-IN_COOLDOWN=false
-COOLDOWN_MARKER="$REMEMBER_DIR/tmp/last-save-ts"
-if [ -f "$COOLDOWN_MARKER" ]; then
-    LAST_TS=0
-    read -r LAST_TS < "$COOLDOWN_MARKER" 2>/dev/null
-    if [ -z "$LAST_TS" ] || [ "${LAST_TS#*[!0-9]}" != "$LAST_TS" ]; then LAST_TS=0; fi
-    SAVE_COOLDOWN="${REMEMBER_SAVE_COOLDOWN:-120}"
-    _ELAPSED=$(( $(_remember_date +%s) - 10#$LAST_TS ))
-    [ "$_ELAPSED" -ge 0 ] && [ "$_ELAPSED" -lt "$SAVE_COOLDOWN" ] && IN_COOLDOWN=true
-fi
 
 DELTA_THRESHOLD="${REMEMBER_DELTA_THRESHOLD:-50}"
 if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
