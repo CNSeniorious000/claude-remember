@@ -1174,13 +1174,62 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
                     _LAST_SAVE_STATE="unreadable"
                 fi
             fi
-            # An expansion test, not a quoted literal in a case pattern
-            # (#898 round 9, a directory-scanner hold shape).
-            _SESSIONS_SCOPE=${_LAST_SAVE_CONTENT#*"$_pt_dq"sessions"$_pt_dq"}
-            if [ "$_SESSIONS_SCOPE" != "$_LAST_SAVE_CONTENT" ]; then
-                _SESSIONS_SCOPE="${_SESSIONS_SCOPE%%\}*}"
-            else
-                _SESSIONS_SCOPE=""
+            # #1021: the two parameter expansions this replaced --
+            # `${_LAST_SAVE_CONTENT#*"sessions"}` then `${_SESSIONS_SCOPE%%\}*}`
+            # -- are QUADRATIC in bash's `#`/`%` glob-match engine (the same
+            # class #1017 fixed for `_pt_scan_lines`'s newline count, and
+            # #898 already documents for other expansion forms). Measured by
+            # the release auditor on real `/bin/bash` 3.2.57: 0.02s at 100
+            # sessions, 1.93s at 1,000, 179s at 10,000, with "sessions"
+            # positioned worst-case at the END of the file.
+            #
+            # `cmd_save_position` (pipeline/shell.py) is the only writer of
+            # this file, caps it at `_POSITION_SLOTS` (32) sessions, and
+            # always writes "sessions" as the FIRST key of the payload --
+            # so in every real file this repo's own writer produces, the
+            # realistic worst case the issue's own synthetic fixture
+            # constructs (sessions key at the end, thousands of entries)
+            # cannot occur. The fix below is defense-in-depth, not a
+            # response to an observed production slowdown.
+            #
+            # `[[ STR =~ REGEX ]]` (POSIX regexec, not bash's glob-match
+            # engine) measured LINEAR on the same /bin/bash 3.2.57 host:
+            # 0.01s at 10,000 sessions, 0.017s at 20,000 -- where the old
+            # expansion pair took 2.05s and 9.69s. No new fork: BASH_REMATCH
+            # is a builtin, same as the expansion it replaces.
+            #
+            # `([^}]*)` with NO trailing `\}` requirement: a greedy `[^}]*`
+            # stops at the first literal `}` when one exists -- the same
+            # "up to the first closing brace" scope the old `%%\}*` produced
+            # -- and matches to the end of the string when none does,
+            # because nothing after the capture group forces backtracking.
+            # Self-review's first draft required a trailing `\}` and kept
+            # an `elif` fallback (the old quadratic prefix-strip) for a
+            # truncated/corrupted file with no closing brace anywhere after
+            # "sessions" -- a case the atomic temp-file-then-rename writer
+            # below should never produce, but still a live exposure on an
+            # already-broken file for as long as the sidecar-trust check
+            # keeps running on every tool call. Dropping the trailing `\}`
+            # removes the fallback (and the exposure) entirely: re-measured
+            # on a 20,000-filler-session file with NO closing brace anywhere
+            # after "sessions" -- 0.022s, same as the well-formed
+            # 20,000-session case, not the quadratic cost the fallback
+            # existed to re-admit. Byte-identical to the old two-expansion
+            # form on every case measured (normal, empty, absent "sessions",
+            # sessions-at-end, empty sessions object, truncated-no-brace, a
+            # double "sessions" occurrence).
+            #
+            # Built from `$_pt_dq` -- not a literal `\"` in the pattern --
+            # the same technique the two expansions this replaces already
+            # used (not new work this fix introduces): #898 round 8's
+            # scanner (tests/test_scanner_shapes_source_898.py,
+            # `_check_escaped_quote`) flags an escaped double quote shipped
+            # in a hook script, because the build's inlining step can hold
+            # on it.
+            _SESSIONS_SCOPE=""
+            _PT_SESSIONS_RE="$_pt_dq"'sessions'"$_pt_dq"'([^}]*)'
+            if [[ "$_LAST_SAVE_CONTENT" =~ $_PT_SESSIONS_RE ]]; then
+                _SESSIONS_SCOPE="${BASH_REMATCH[1]}"
             fi
             if [[ "$_SESSIONS_SCOPE" == *"$_pt_dq"$SESSION_ID"$_pt_dq":* ]]; then
                 LAST_LINE=$((10#$_SIDECAR_LINE))
