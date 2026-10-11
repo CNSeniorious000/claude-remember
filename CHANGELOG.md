@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.1] - 2026-10-12 — Honest fork counts after the #1029/#1031 cut, the bracket-test dynamic-dispatch detector, and a named CI leg when pytest hangs
+
+### Fixed
+
+- Fixed #906: `compile_hooks.py`'s `_DYNAMIC_CALL_RE` dynamic-dispatch detector
+  matched `&& "$name"` even when `"$name"` was a test operand inside
+  `[[ ... ]]`/`[ ... ]`, not a real call through a variable -- the exact shape
+  that grew a compiled hook from ~122 KB to 135,889 B during #899's size work,
+  with no visible symptom besides the size. Operands inside bracket-test
+  spans are now masked before the dynamic-dispatch scan runs, and when
+  tree-shaking genuinely is disabled, `compile_hooks.py --apply` now prints
+  the reason and the triggering line to stderr instead of staying silent.
+
+- Corrects a process-count claim from this range's own v0.43.0 entries (#1011, #1017): "1 (`tail` only)" / "a second spawn, `wc`" counted only **exec'd binaries** -- programs named on PATH -- never the bash **subshell forks** a `$(...)` command substitution or a `|` pipe also creates, even when nothing inside them execs a new binary at all. A round-2 follow-up to this same fragment then asserted the regression it found against the wrong number: the whole below-threshold hook invocation's own real fork count (measured via `strace -f -e trace=clone,clone3,fork,vfork` on CI, every clone/fork/vfork anywhere in the process tree -- libs sourced, tool-detection probes, the background save detach, all of it) checked against 6, a figure that only ever described `_pt_scan_lines`'s own local contribution, not the whole hook. CI measured 67 on every run across every Linux leg, not below 6.
+
+  Measured the right way now: `tests/test_post_tool_total_processes_1011.py` runs the identical strace harness against three real trees on CI -- the tagged `v0.42.4` release, the tagged `v0.43.0` release immediately preceding this one, and this fix -- instead of asserting against a hand-picked threshold. CI-measured whole-hook totals for the below-threshold no-save path, minimum of 9 runs each, identical on every Linux leg: `v0.42.4` = 68, `v0.43.0` = 69, this fix (HEAD) = 67. The fix itself is real and small -- `_pt_scan_lines` now sets globals instead of running inside an outer command substitution, and its newline count uses a herestring into `wc -l` instead of a `printf | wc` pipe, removing two subshell forks -- and it does land below both baselines, but the whole-hook invocation still creates on the order of 67 processes for one no-save `PostToolUse` call. On the Windows 11 25H2 build #1011 originally reported against, each of those is a real kernel Token that leaks until reboot; a two-process improvement does not change that order of magnitude. Attributing which script lines and sourced libraries account for the bulk of the 67 is tracked separately, not in this fragment: see the newly filed follow-up issue.
+
+  The cooldown-active path's own reduction (skips the scan entirely) is unaffected by this correction and remains genuine.
+
+- Fixed #1014: a hung pytest leg on CI used to be cancelled by its own
+  job-level `timeout-minutes` with no log at all, leaving no way to tell
+  which test hung. `pyproject.toml` now sets `faulthandler_timeout = 900`
+  so a stuck test dumps every thread's traceback well before CI's own
+  25-minute step timeout fires, the "Run tests" step now runs under its
+  own `timeout-minutes: 25` and tees output to a log file that is uploaded
+  as an artifact under `if: always()`, and a Windows leg additionally
+  lists any surviving `wscript.exe`/`bash.exe`/`conhost.exe`/
+  `powershell.exe` processes at teardown. Proven on Linux (run 38122057767,
+  job 114445674357): the faulthandler traceback naming the stuck test is
+  present in the kept log. The equivalent Windows failure mode (a job
+  ending `cancelled` with no log at all, run 38122057767, job
+  114418645594) is not shown fixed by this change; tracked separately.
+
+- #1029: three unconditional per-call forks removed from `post-tool-hook.sh`, on top of CI-measured strace totals this range already tracks (`v0.42.4` = 68, `v0.43.0` = 69, prior HEAD per #1028 = 67). `_stdin_json_string` (`cwd`, `session_id`, `transcript_path`) was called through `X=$(...)` command substitution at three sites above the fast/slow-path split, each forking a subshell even though the function itself is pure parameter expansion -- the same cost class `lib-clock.sh`'s own `_remember_date_into` fix already removed elsewhere in this hook. Ported to the fork-free `_stdin_json_string_into` form `session-start-hook.sh` already used (#665, part of #660): identical matching algorithm (same first-occurrence scan, same #344 gap, same #829 double-backslash collapse), no behaviour change, three fewer forks on every invocation of this hook, cold-start and warm path alike.
+
+  `tests/test_post_tool_total_processes_1011.py`'s own fixture measures the cold-start path only (a brand-new project with no warmed caches), which is why #1011/#1028's own strace totals land near 67-69 rather than the much lower warm-path count a real session's later tool calls pay once a project has run once. On that warm path, the only forks left after this cut are `_pt_scan_lines`'s own `tail`+`wc` pair, already documented in-code as unavoidable without reintroducing #1017's quadratic bash-expansion regression -- every other candidate this issue named (`bootstrap-dirs.sh`'s directory creation, the `jq` config read, the `mktemp`+`mv` atomic-write patterns) traced to cold-path-only work already gated behind existence checks (#230/#666) or work inside the byte-pinned `lib-memory-dir.sh` (`tests/test_case_divergence_298.py` forbids touching it).
+
+  `tests/test_post_tool_total_processes_1011.py` now asserts an absolute budget (strictly below 67, this round's own prior total) for both the below-threshold and cooldown paths, in addition to the existing relative tag-comparisons, so a regression is caught even on a no-network CI leg where neither tagged baseline tree can be materialized. Confirmed by this pull request's own CI run, the same strace harness against the same three trees: the whole-hook, cold-start, below-threshold total is `v0.42.4` = 68, `v0.43.0` = 69, HEAD (this fix) = 64 -- three fewer than the 67 reasoned above, matching the three forks this fix removes. The warm-call cost (a project that already ran once, caches populated) is not measured by this fixture and no number is claimed for it.
+
 ## [0.43.0] - 2026-10-11 — Fewer forks per PostToolUse call on bash 3.2/5, and a doctor warning for a Windows 11 25H2 kernel-Token leak
 
 ### Added
@@ -4777,7 +4816,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.43.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.43.1...HEAD
+[0.43.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.43.1
 [0.43.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.43.0
 [0.42.4]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.4
 [0.42.3]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.3
