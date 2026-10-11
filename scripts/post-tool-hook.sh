@@ -1804,23 +1804,24 @@ if [ ! -t 0 ]; then
     done
 fi
 
-_stdin_json_string() {
-    local field="$1" raw="$2" rest prefix value dq
-    printf -v dq '\042'
-    [[ "$raw" == *"$dq$field$dq"* ]] || return 1
-    rest=${raw#*"$dq"$field"$dq"}
-    prefix=${rest%%"$dq"*}
-    if [[ "$prefix" == *[!:[:space:]]* ]]; then return 1; fi
-    value=${rest#*"$dq"}
-    value=${value%%"$dq"*}
-    value=${value//\\\\/\\}
-    [ -n "$value" ] || return 1
-    printf '%s' "$value"
+_stdin_json_string_into() {
+    local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
+    printf -v "$_sjsi_var" '%s' ""
+    printf -v _sjsi_dq '\042'
+    [[ "$_sjsi_raw" == *"$_sjsi_dq$_sjsi_field$_sjsi_dq"* ]] || return 1
+    _sjsi_rest=${_sjsi_raw#*"$_sjsi_dq"$_sjsi_field"$_sjsi_dq"}
+    _sjsi_prefix=${_sjsi_rest%%"$_sjsi_dq"*}
+    if [[ "$_sjsi_prefix" == *[!:[:space:]]* ]]; then return 1; fi
+    _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
+    _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
+    _sjsi_value=${_sjsi_value//\\\\/\\}
+    [ -n "$_sjsi_value" ] || return 1
+    printf -v "$_sjsi_var" '%s' "$_sjsi_value"
 }
 
 printf -v _pt_dq '\042'
 
-REMEMBER_HOOK_CWD=$(_stdin_json_string cwd "$HOOK_STDIN" 2>/dev/null) || REMEMBER_HOOK_CWD=""
+_stdin_json_string_into REMEMBER_HOOK_CWD cwd "$HOOK_STDIN" 2>/dev/null
 if [[ "$REMEMBER_HOOK_CWD" == *$'\n'* ]] \
     || [[ "$REMEMBER_HOOK_CWD" == *$'\r'* ]]; then
     REMEMBER_HOOK_CWD=""
@@ -1880,14 +1881,14 @@ if ! : > "$REMEMBER_DIR/tmp/post-tool-ran" 2>/dev/null; then
         && : > "$REMEMBER_DIR/tmp/post-tool-ran" 2>/dev/null || true
 fi
 
-STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || STDIN_SESSION_ID=""
+_stdin_json_string_into STDIN_SESSION_ID session_id "$HOOK_STDIN" 2>/dev/null
 if [ -z "${STDIN_SESSION_ID#.}" ] || [ -z "${STDIN_SESSION_ID#..}" ] \
     || [ "${STDIN_SESSION_ID#-}" != "$STDIN_SESSION_ID" ] \
     || [[ "$STDIN_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
     STDIN_SESSION_ID=""
 fi
 
-STDIN_TRANSCRIPT_PATH=$(_stdin_json_string transcript_path "$HOOK_STDIN" 2>/dev/null) || STDIN_TRANSCRIPT_PATH=""
+_stdin_json_string_into STDIN_TRANSCRIPT_PATH transcript_path "$HOOK_STDIN" 2>/dev/null
 if [[ "$STDIN_TRANSCRIPT_PATH" == *$'\r'* ]]; then
     STDIN_TRANSCRIPT_PATH=""
 fi
@@ -2030,11 +2031,14 @@ if [ -f "$COOLDOWN_MARKER" ]; then
     read -r LAST_TS < "$COOLDOWN_MARKER" 2>/dev/null
     if [ -z "$LAST_TS" ] || [ "${LAST_TS#*[!0-9]}" != "$LAST_TS" ]; then LAST_TS=0; fi
     SAVE_COOLDOWN="${REMEMBER_SAVE_COOLDOWN:-120}"
-    _ELAPSED=$(( $(_remember_date +%s) - 10#$LAST_TS ))
+    _remember_date_into _PT_NOW_TS +%s
+    _ELAPSED=$(( 10#$_PT_NOW_TS - 10#$LAST_TS ))
     [ "$_ELAPSED" -ge 0 ] && [ "$_ELAPSED" -lt "$SAVE_COOLDOWN" ] && IN_COOLDOWN=true
 fi
 
 if [ "$IN_COOLDOWN" = false ]; then
+PT_SCAN_OFFSET=0
+PT_SCAN_LINES=0
 _pt_scan_lines() {
     local LC_ALL=C
     local _off="$1" _lines="$2" _file="$3"
@@ -2053,11 +2057,14 @@ _pt_scan_lines() {
     fi
     local _partial=${_chunk##*$'\n'}
     local _complete=${_chunk%"$_partial"}
-    local _nl_count
-    _nl_count=$(printf '%s' "$_complete" | wc -l)
-    _nl_count=${_nl_count//[^0-9]}
-    [ -z "$_nl_count" ] && _nl_count=0
-    printf '%s %s\n' "$(( _off + ${#_complete} ))" "$(( _lines + _nl_count ))"
+    local _nl_count=0
+    if [ -n "$_complete" ]; then
+        _nl_count=$(wc -l <<< "${_complete%$'\n'}")
+        _nl_count=${_nl_count//[^0-9]}
+        [ -z "$_nl_count" ] && _nl_count=0
+    fi
+    PT_SCAN_OFFSET=$(( _off + ${#_complete} ))
+    PT_SCAN_LINES=$(( _lines + _nl_count ))
 }
 
 _SCAN_NAME="${TRANSCRIPT##*/}"
@@ -2088,9 +2095,9 @@ else
     SCAN_SIDECAR=""
 fi
 
-_SCAN_RESULT=$(_pt_scan_lines "$_SCAN_OFFSET" "$_SCAN_LINES" "$TRANSCRIPT")
-_SCAN_NEW_OFFSET=${_SCAN_RESULT%% *}
-CURRENT_LINES=${_SCAN_RESULT##* }
+_pt_scan_lines "$_SCAN_OFFSET" "$_SCAN_LINES" "$TRANSCRIPT"
+_SCAN_NEW_OFFSET=$PT_SCAN_OFFSET
+CURRENT_LINES=$PT_SCAN_LINES
 CURRENT_LINES=$(( CURRENT_LINES + 0 ))
 
 if [ -n "$SCAN_SIDECAR" ]; then
