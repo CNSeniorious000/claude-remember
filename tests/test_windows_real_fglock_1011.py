@@ -75,10 +75,14 @@ def test_real_timeout_probe_returns_an_integer(tmp_path):
     # windows-latest CI (jobs 114303128794, 114303128471), while the build
     # probe above, which runs no Add-Type compile, passed reliably. A
     # diagnostic run (elapsed=10.81s, returncode=0, empty stdout/stderr)
-    # proved the Add-Type C# compile in
-    # _remember_doctor_fglock_timeout exceeded doctor.sh's old 5s watchdog
-    # bound -- fixed by widening that one probe's bound to 20s (see
-    # scripts/doctor.sh's own comment on _remember_doctor_run_powershell_file).
+    # proved the Add-Type C# compile in _remember_doctor_fglock_timeout
+    # exceeded doctor.sh's old 5s watchdog bound -- round 4 widened that
+    # one probe's bound to 20s, but a later CI run (38110311076,
+    # 114384312765) measured 25.81s, exceeding even that. Round 5 removed
+    # the Add-Type compile entirely in favor of a compile-free
+    # System.Reflection.Emit P/Invoke (see scripts/doctor.sh's own comment
+    # on _remember_doctor_fglock_timeout), so this probe shares the
+    # standard 5s bound again -- no compiler process left to wait out.
     # Elapsed time and exit code stay in the assertion message below,
     # permanently -- cheap, and the next regression here won't need a
     # separate diagnostic round-trip to tell a watchdog-bound issue apart
@@ -91,6 +95,16 @@ def test_real_timeout_probe_returns_an_integer(tmp_path):
         f"timeout probe did not return a bare integer: {result.stdout!r} "
         f"(stderr: {result.stderr!r}, elapsed={elapsed:.2f}s, "
         f"returncode={result.returncode})"
+    )
+    # isdigit() alone accepts "0", and 0 is the one value doctor.sh reads as
+    # "workaround applied" (OK, no WARN). A mis-marshalled P/Invoke that
+    # silently returned 0 would pass the line above while suppressing the
+    # warning -- the dangerous direction. A stock CI host has never had the
+    # workaround applied, so its live value is the non-zero default.
+    assert int(result.stdout.strip()) > 0, (
+        f"timeout probe returned 0 on a CI host that never applied the "
+        f"#1011 workaround -- likely a mis-marshalled read, not the live value "
+        f"(elapsed={elapsed:.2f}s)"
     )
 
 
