@@ -7,3 +7,33 @@ testpaths = ["tests"]
 # human. Rendered as a bare `s`, a green run with silent skips is visually
 # identical to a green run that checked everything (#306).
 addopts = "-rs --durations=25 --cov=pipeline --cov-report=term-missing --cov-fail-under=80"
+
+# #1014: a job cancelled by its own job-level timeout-minutes writes NO log at
+# all, so a hung test used to be unidentifiable. faulthandler_timeout (builtin
+# to pytest, no new dependency) dumps every thread's traceback -- naming the
+# hung test -- once any single test runs longer than this. Sized from a green
+# windows-latest run's own --durations=25 output (run 38091996750, job
+# 114330142530): the slowest single test there was 30.14s, so 900s leaves
+# ~30x margin over normal variance, and fires well inside the step's own
+# 25min (1500s) timeout below.
+#
+# #1014 round 2 PROOF (run 38122057767, job 114445674357, pytest
+# linux/3.x -- a deliberately hanging test, with faulthandler_timeout
+# temporarily lowered and the step timeout left in place): the
+# faulthandler traceback naming the stuck test IS present in the kept
+# log, followed by "##[error]The action 'Run tests' has timed out after
+# 25 minutes." -- i.e. the STEP timeout is what kept the log, not
+# faulthandler_exit_on_timeout: pytest was not observed to exit on its
+# own before the step timeout fired. faulthandler_exit_on_timeout is
+# therefore not enabled here; it was not shown to do anything in this
+# proof, and this repo does not rely on it. Only Linux was proven this
+# way -- the earlier round-2 Windows failure (run 38122057767, job
+# 114418645594: cancelled, no log, after ~33.6 min past the step's own
+# 25min timeout) is NOT shown fixed by this setting; see issue filed
+# separately for that gap.
+#
+# Compatible with --cov (faulthandler is independent of coverage collection)
+# and with pytest-xdist if it is ever added (this repo currently has none,
+# confirmed by a repo-wide grep); both ini options are per-worker/per-process
+# settings either way.
+faulthandler_timeout = 900

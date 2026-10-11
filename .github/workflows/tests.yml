@@ -87,7 +87,46 @@ jobs:
           Add-MpPreference -ExclusionPath "${{ github.workspace }}"
           Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
       - name: Run tests
-        run: pytest
+        # #1014 round 2: this PR's own CI already hit a Windows leg that
+        # ran past this timeout and still ended `cancelled` with no log at
+        # all (job 114418645594) -- the step-level kill is not trusted to
+        # fire on its own on every OS. pyproject.toml's faulthandler_timeout
+        # dumps the stuck test's traceback well inside this bound, and the
+        # step's own timeout-minutes is what actually ends the step and
+        # keeps the log (proven on Linux: run 38122057767, job
+        # 114445674357 -- the faulthandler traceback IS in the kept log,
+        # followed by the step-timeout error). `tee` is belt-and-braces on
+        # top of that: whatever reached the log file before the step ends
+        # is uploaded as an artifact below under `if: always()`, rather
+        # than depending only on the step's own captured output surviving.
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest 2>&1 | tee pytest-output.log
+      - name: Upload pytest output log
+        # `if: always()` so a failed or timed-out step still uploads
+        # whatever reached the file -- the one case this cannot cover is
+        # a job-level `cancelled` (#1014's original failure mode, observed
+        # on Windows: job 114418645594), where GitHub Actions stops
+        # running steps entirely rather than executing the ones still
+        # pending. That path is not proven fixed here -- see the issue
+        # filed for the unproven Windows cancellation case.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output-${{ matrix.os }}-${{ matrix.python-version }}
+          path: pytest-output.log
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: List surviving wscript/bash/conhost/powershell processes (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Process |
+            Where-Object { $_.Name -in @('wscript.exe', 'bash.exe', 'conhost.exe', 'powershell.exe') } |
+            Select-Object ProcessId, ParentProcessId, Name, CommandLine |
+            Format-List
 
   # #900: each hooks.json-registered hook script is inlined and
   # comment-stripped for the release tree (compile_hooks.py) so the
@@ -139,4 +178,26 @@ jobs:
         # above already uses on this same matrix.
         run: python .github/scripts/compile_hooks.py --repo . --apply
       - name: Run the full suite against the compiled hooks
-        run: pytest
+        # Same #1014-round-2 reasoning as the plain pytest job's own "Run
+        # tests" step above.
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest 2>&1 | tee pytest-output.log
+      - name: Upload pytest output log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output-hooks-${{ matrix.os }}
+          path: pytest-output.log
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: List surviving wscript/bash/conhost/powershell processes (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Process |
+            Where-Object { $_.Name -in @('wscript.exe', 'bash.exe', 'conhost.exe', 'powershell.exe') } |
+            Select-Object ProcessId, ParentProcessId, Name, CommandLine |
+            Format-List
