@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-10-11 — Fewer forks per PostToolUse call on bash 3.2/5, and a doctor warning for a Windows 11 25H2 kernel-Token leak
+
+### Added
+
+- doctor.sh now warns (never fails) on Windows when the current build is known-affected by a kernel Token-object leak (#1011, reported by @NanoInG) and the live foreground lock timeout is not 0. The warning points at a new docs/windows.md section covering the confirmed workaround, its logon-task requirement and focus-stealing trade-off, and Restart vs Shut down -- an opt-in system change the user decides on, never applied by this plugin itself.
+
+### Fixed
+
+- #913: `post-tool-hook.sh` no longer reads the whole transcript on every tool call. The line count that decides whether to fire a save now lives in a small sidecar keyed by the transcript's own name (`$REMEMBER_DIR/tmp/transcript-scan.<name>`, storing a byte offset and a line count), and the hook reads only the bytes appended since the last call -- `tail -c +OFFSET`, with its own first byte doubling as a validator against a shrunk or rewritten transcript, falling back to a full recount whenever that check fails. A record still being written (no trailing newline yet) is never counted and never advances the offset, so a half-written line is picked up whole on the next call. Separately, the cooldown check that decides whether a save can fire at all now runs BEFORE this scan rather than after it, so a tool call inside the post-save cooldown window skips the scan entirely -- as #1011 points out, on an affected Windows 11 25H2 build every avoided fork is a kernel Token object that never leaks, not merely latency saved. Which saves fire, and at what threshold, is unchanged.
+
+- Fixed #1011: the PostToolUse hook's no-save path (both the cooldown-active
+  branch and the below-threshold branch) forked 4 external processes per
+  tool call for work that needed none of them. The transcript lookup
+  (`ls -t ... | head -1`) is now a forkless glob-plus-mtime walk, falling
+  back to `ls -t` only on a genuine same-second mtime tie (bash 3.2's `-nt`
+  compares at whole-second resolution, which can tie two transcripts
+  written moments apart). The capture-alive marker's atomic write (`mv -f`)
+  is now skipped -- written in place instead, with no temp file and no
+  rename, to keep its mtime moving for doctor.sh's "PostToolUse still
+  firing" check -- whenever it already holds the current session id, which
+  is every tool call after the first in a session. Measured on real
+  `/bin/bash` 3.2 against current `main` (after #913's own incremental
+  transcript scan, which had already dropped the cooldown path from 5
+  spawns to 4 and the below-threshold path from 4 spawns to 4 with a
+  different shape -- `wc` replaced by `tail`): the cooldown path dropped
+  from 4 spawns (`ls`, `head`, `mv`, `date`) to 1 (`date` only), and the
+  below-threshold path from 4 spawns (`head`, `ls`, `mv`, `tail`) to 1
+  (`tail` only). On Windows 11 25H2, each of those spawns was a
+  console-attached process that leaked a kernel Token object until reboot,
+  not just latency; thanks to @NanoInG for tracing the kernel-side root
+  cause and reporting it. (#1017 later added a second spawn, `wc`, to the
+  below-threshold path specifically -- see that fragment -- so "1 (`tail`
+  only)" above describes the below-threshold path as it stood between
+  #1011 and #1017, not as it ships in this release; the cooldown-active
+  path, 1 spawn (`date` only), is unaffected.)
+
+- Fixed a flaky `doctor.sh` probe for #1011's kernel Token-leak check: the live foreground-lock-timeout read no longer compiles an inline C# P/Invoke via `Add-Type`/`csc.exe`, which could take over 20 seconds under load and made the check intermittently report "could not determine" instead of a real answer. It now reads the same Win32 API value with a compile-free `System.Reflection.Emit` P/Invoke; what the check warns on is unchanged.
+
+- Fixed #1011: `doctor.sh`'s two real-PowerShell probes (Windows build number, live foreground-lock timeout) each paid the FULL watchdog bound even when PowerShell answered in about a second -- the watchdog subshell's `sleep` inherited the function's own stdout, and every real caller reads that output via command substitution (`$(...)`), which blocks until every process holding the pipe open closes it, not just until the real data arrives. Measured on real `windows-latest` CI (PR #1024): each probe cost roughly 2x its own bound (about 11s at a 5s bound, about 31s at a 15s bound) instead of the ~1s PowerShell itself needed, adding roughly 30s to every `/remember:doctor` run on Windows. The watchdog now redirects its own output away from the caller's pipe and hands its `sleep` child's real PID back out through a small temp file, so an early PowerShell exit can kill that `sleep` directly too, leaving no stray process running for the rest of the old bound either way. `scripts/lib-detach.sh`'s own Windows-save watchdog (`_remember_detach_windows`, used on every Windows save) was audited for the same pattern and found already unaffected -- its watchdog already redirects its own output (from the same #1002 fix), confirmed here by direct measurement: all of its stub-driven tests return in well under 1.5s against its 15s bound.
+
+- Fixed #1017: `post-tool-hook.sh`'s incremental transcript scan (#913)
+  counted the newlines in each appended chunk with a per-byte bash
+  parameter substitution, which is quadratic in chunk size on bash 3.2
+  and 5.3 alike -- measured at 110.81s for a 2MB chunk on bash 5.3.15 and
+  415.67s for a 50KB chunk on `/bin/bash` 3.2.57 (this repo's documented
+  floor shell, and macOS's shipped default). This regressed the exact
+  scenario #913 was fixing -- the first post-upgrade call on an existing
+  session, which rescans the whole transcript -- to far worse than the
+  229ms whole-file `wc -l` #913 replaced. The count now runs through
+  `wc -l` instead, a linear C loop. That costs one extra fork per call
+  (`wc`, alongside the `tail` #913 already added) on the below-threshold
+  and warm-save paths -- #1011's own spawn-count claims for those two
+  paths are updated in its own fragment to say so; the cooldown-active
+  no-save path, which never reaches this scan at all, is unaffected and
+  stays at 1 spawn.
+
+- Fixed #1019: `post-tool-hook.sh`'s capture-alive marker (the file
+  doctor.sh reads to decide "is PostToolUse still firing") stopped
+  refreshing its mtime once SESSION_ID came back empty (the
+  basename-sanitiser route, e.g. a non-Claude-Code transcript name) and
+  the marker already held that same empty content -- #1016's in-place
+  write for the "already holds it" case writes zero bytes in that
+  situation, and a 0-byte write(2) never touches mtime (POSIX). A
+  healthy, actively-firing session could therefore report as
+  increasingly stale under doctor.sh's "PostToolUse marker present (Ns
+  old)" check. An empty SESSION_ID now always takes the atomic
+  tmp+mv branch instead, which touches mtime regardless of content; the
+  common (non-empty, unchanged) case keeps #1016's no-fork optimization
+  unchanged.
+
+- Fixed #1021: `post-tool-hook.sh`'s #353 sidecar-trust fast path extracted
+  the `"sessions"` object out of the whole `last-save.json` file with
+  `${_LAST_SAVE_CONTENT#*"sessions"}` then `${_SESSIONS_SCOPE%%\}*}` -- the
+  same quadratic bash parameter-expansion class #1017 fixed for
+  `_pt_scan_lines`'s newline count. Measured on real `/bin/bash` 3.2.57 with
+  "sessions" worst-cased at the end of a synthetic file: 2.05s at 10,000
+  sessions, 9.69s at 20,000 (pre-fix); 0.015s and 0.027s after. In real use
+  this path never reaches that shape: `cmd_save_position` caps the file at
+  `_POSITION_SLOTS` (32) sessions and always writes "sessions" as the FIRST
+  key, so every file measured on this machine topped out at ~1.55KB -- the
+  fix is defense-in-depth, not a response to an observed slowdown. The
+  extraction now runs through one builtin `[[ STR =~ REGEX ]]` match
+  (POSIX regexec, not bash's glob-match engine) instead -- no new fork.
+  Self-review caught that the first draft's `elif` fallback (kept for a
+  truncated/corrupted file with no closing brace after "sessions") still
+  reintroduced the quadratic shape on exactly that input; dropping the
+  regex's trailing `}` requirement removes the fallback entirely instead,
+  measured linear (0.022s) on a 20,000-session truncated file too.
+
 ## [0.42.4] - 2026-10-10 — Windows PostToolUse saves were silently not running on v0.42.3 -- update now
 
 ### Fixed
@@ -4688,7 +4777,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.42.4...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.43.0...HEAD
+[0.43.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.43.0
 [0.42.4]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.4
 [0.42.3]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.3
 [0.42.2]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.2
