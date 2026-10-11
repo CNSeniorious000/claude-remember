@@ -891,7 +891,15 @@ if [ -f "$COOLDOWN_MARKER" ]; then
     read -r LAST_TS < "$COOLDOWN_MARKER" 2>/dev/null
     if [ -z "$LAST_TS" ] || [ "${LAST_TS#*[!0-9]}" != "$LAST_TS" ]; then LAST_TS=0; fi
     SAVE_COOLDOWN="${REMEMBER_SAVE_COOLDOWN:-120}"
-    _ELAPSED=$(( $(_remember_date +%s) - 10#$LAST_TS ))
+    # #1011 round 2 self-review: `$(_remember_date +%s)` forks a subshell for
+    # the command substitution EVEN on the builtin, no-process path -- the
+    # same cost lib-clock.sh's own comment above `_remember_date_into`
+    # documents and session-start-hook.sh already avoids at its own two
+    # `+%s` call sites. This cooldown check runs on every tool call once a
+    # save has ever fired, so it is squarely a no-save-path fork like the
+    # ones above; `_remember_date_into` removes it the same way.
+    _remember_date_into _PT_NOW_TS +%s
+    _ELAPSED=$(( 10#$_PT_NOW_TS - 10#$LAST_TS ))
     [ "$_ELAPSED" -ge 0 ] && [ "$_ELAPSED" -lt "$SAVE_COOLDOWN" ] && IN_COOLDOWN=true
 fi
 
@@ -940,6 +948,8 @@ fi
 # #913's own win (no longer reading the whole transcript on every call) is
 # untouched, and the scan itself still skips entirely under cooldown.
 if [ "$IN_COOLDOWN" = false ]; then
+PT_SCAN_OFFSET=0
+PT_SCAN_LINES=0
 _pt_scan_lines() {
     local LC_ALL=C
     local _off="$1" _lines="$2" _file="$3"
@@ -966,15 +976,22 @@ _pt_scan_lines() {
     # documented floor) -- regressing the exact #913 scenario (the first
     # post-upgrade call on an existing session, which rescans the whole
     # transcript) to far worse than the 229ms whole-file `wc -l` #913
-    # replaced. `wc -l` is a linear C loop; piping `_complete` through it
-    # costs one extra fork per call (`printf` is a builtin, so only `wc`
-    # is a new process `tests/spawn_counting.py`'s shim can see), not a
-    # cost that grows with chunk size beyond the linear read itself.
-    local _nl_count
-    _nl_count=$(printf '%s' "$_complete" | wc -l)
-    _nl_count=${_nl_count//[^0-9]}
-    [ -z "$_nl_count" ] && _nl_count=0
-    printf '%s %s\n' "$(( _off + ${#_complete} ))" "$(( _lines + _nl_count ))"
+    # replaced. `wc -l` itself stays a single linear C loop, unavoidably
+    # a fork of its own -- what moved (#1011 round 2) is only which
+    # processes carry the bytes to it: this used to pipe `_complete`
+    # through `printf | wc -l`, a SECOND subshell fork for the pipe on
+    # top of the `wc` exec, invisible to `tests/spawn_counting.py`'s
+    # exec-only shim either way. It now goes through a herestring
+    # instead, one fork fewer, and is skipped entirely (no fork at all)
+    # when there is no complete line to count.
+    local _nl_count=0
+    if [ -n "$_complete" ]; then
+        _nl_count=$(wc -l <<< "${_complete%$'\n'}")
+        _nl_count=${_nl_count//[^0-9]}
+        [ -z "$_nl_count" ] && _nl_count=0
+    fi
+    PT_SCAN_OFFSET=$(( _off + ${#_complete} ))
+    PT_SCAN_LINES=$(( _lines + _nl_count ))
 }
 
 _SCAN_NAME="${TRANSCRIPT##*/}"
@@ -1016,9 +1033,9 @@ else
     SCAN_SIDECAR=""
 fi
 
-_SCAN_RESULT=$(_pt_scan_lines "$_SCAN_OFFSET" "$_SCAN_LINES" "$TRANSCRIPT")
-_SCAN_NEW_OFFSET=${_SCAN_RESULT%% *}
-CURRENT_LINES=${_SCAN_RESULT##* }
+_pt_scan_lines "$_SCAN_OFFSET" "$_SCAN_LINES" "$TRANSCRIPT"
+_SCAN_NEW_OFFSET=$PT_SCAN_OFFSET
+CURRENT_LINES=$PT_SCAN_LINES
 CURRENT_LINES=$(( CURRENT_LINES + 0 ))
 
 # Plain redirect, not the mktemp+rename the #353 sidecar uses: a partial
