@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.2] - 2026-10-18 — The Windows PostToolUse stall on long sessions
+
+### Fixed
+
+- Fixed #1034: on Windows, the transcript-scan cache added for #913 was never
+  used, so every tool call re-read the whole session transcript (minutes per
+  call on a 100+ MB one). Claude Code on Windows sends `transcript_path` as a
+  native `C:\Users\...\<session-id>.jsonl` path, and `post-tool-hook.sh` took
+  its file name by splitting on `/` only -- with no `/` in the path, the name
+  came out empty and the cache was silently skipped. All three file-name
+  sites in the hook now split on a backslash too (the cache name, the
+  session-id fallback used when a payload carries `transcript_path` without
+  `session_id`, and one log message). When the cache name still comes out
+  unusable, the hook now logs one warning per transcript instead of saying
+  nothing. Reported and diagnosed by @RidoMr.
+
+- Fixed #1036: the first tool call of a session could hang for 10 minutes on
+  a big transcript, and then every call after it too. The first time the hook
+  looks at a session (every new session, and every existing one after an
+  upgrade) it counts the lines of the whole transcript. It used to load the
+  whole file into the shell to do it, which got far slower than the file got
+  bigger: about 1.5 s at 5 MB, 13.5 s at 20 MB and 92 s at 50 MB on Windows.
+  A 247 MB or 1.33 GB transcript hit the 600 s limit Claude Code gives a
+  hook, the hook was stopped before it could note where it had got to, and so
+  the next call started over from the beginning and hit the limit again.
+  The hook now leaves the counting to small system tools (`wc`, `tail`,
+  `head`) that read the file once, at disk speed, and never keeps more than
+  one byte of the transcript in the shell. On macOS, a 24 MB transcript of
+  4 MB lines now adds 0.03 s to the hook instead of 1.5 s, and one that ends
+  in a 3 MB record still being written adds 0.04 s where the old code had not
+  finished after 2 minutes. The count and the resume point are unchanged, and
+  in the common case the hook starts fewer processes than before. Reported and measured by
+  @KRR-66.
+
 ## [0.43.1] - 2026-10-12 — Honest fork counts after the #1029/#1031 cut, the bracket-test dynamic-dispatch detector, and a named CI leg when pytest hangs
 
 ### Fixed
@@ -4816,7 +4850,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.43.1...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.43.2...HEAD
+[0.43.2]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.43.2
 [0.43.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.43.1
 [0.43.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.43.0
 [0.42.4]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.4
