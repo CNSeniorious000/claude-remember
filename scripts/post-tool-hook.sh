@@ -1991,7 +1991,7 @@ fi
 if [ "$STDIN_SESSION_ID_TRUSTED" = true ]; then
     SESSION_ID="$STDIN_SESSION_ID"
 else
-    SESSION_ID="${TRANSCRIPT##*/}"
+    SESSION_ID="${TRANSCRIPT##*[/\\]}"
     SESSION_ID="${SESSION_ID%.jsonl}"
     if [ -z "${SESSION_ID#.}" ] || [ -z "${SESSION_ID#..}" ] \
         || [ "${SESSION_ID#-}" != "$SESSION_ID" ] \
@@ -2042,37 +2042,68 @@ PT_SCAN_LINES=0
 _pt_scan_lines() {
     local LC_ALL=C
     local _off="$1" _lines="$2" _file="$3"
-    local _start=1 _nl=$'\n'
-    [ "$_off" -gt 0 ] && _start="$_off"
-    local _chunk
-    _chunk=$(tail -c +"$_start" "$_file" 2>/dev/null; printf 'X')
-    _chunk=${_chunk%X}
+    local _nl=$'\n' _first="" _last="" _wc="" _n=0 _b=0 _c=0 _end
     if [ "$_off" -gt 0 ]; then
-        local _first=${_chunk:0:1}
-        if [ -z "$_chunk" ] || [ "$_first" != "$_nl" ]; then
+        exec 9< <(exec tail -c +"$_off" "$_file" 2>/dev/null)
+        IFS= read -r -d '' -n 1 _first <&9
+        if [ "$_first" != "$_nl" ]; then
+            exec 9<&-
             _pt_scan_lines 0 0 "$_file"
             return
         fi
-        _chunk=${_chunk:1}
+        _wc=$(exec wc -lc <&9 2>/dev/null)
+        exec 9<&-
+    else
+        _wc=$(exec wc -lc 2>/dev/null < "$_file")
     fi
-    local _partial=${_chunk##*$'\n'}
-    local _complete=${_chunk%"$_partial"}
-    local _nl_count=0
-    if [ -n "$_complete" ]; then
-        _nl_count=$(wc -l <<< "${_complete%$'\n'}")
-        _nl_count=${_nl_count//[^0-9]}
-        [ -z "$_nl_count" ] && _nl_count=0
+    _wc=${_wc#"${_wc%%[0-9]*}"}
+    _n=${_wc%%[!0-9]*}
+    _wc=${_wc#"$_n"}
+    _wc=${_wc#"${_wc%%[0-9]*}"}
+    _b=${_wc%%[!0-9]*}
+    if [ -z "$_n" ] || [[ "$_n" == *[!0-9]* ]]; then _n=0; fi
+    if [ -z "$_b" ] || [[ "$_b" == *[!0-9]* ]]; then _b=0; fi
+    _n=$(( 10#$_n ))
+    _b=$(( 10#$_b ))
+    PT_SCAN_OFFSET=$_off
+    PT_SCAN_LINES=$_lines
+    [ "$_b" -gt 0 ] || return 0
+    _end=$(( _off + 10#$_b ))
+    exec 9< <(exec tail -c +"$_end" "$_file" 2>/dev/null)
+    IFS= read -r -d '' -n 1 _last <&9
+    exec 9<&-
+    if [ "$_last" = "$_nl" ]; then
+        PT_SCAN_OFFSET=$_end
+        PT_SCAN_LINES=$(( _lines + 10#$_n ))
+        return 0
     fi
-    PT_SCAN_OFFSET=$(( _off + ${#_complete} ))
-    PT_SCAN_LINES=$(( _lines + _nl_count ))
+    [ "$_n" -gt 0 ] || return 0
+    if [ "$_off" -gt 0 ]; then
+        _c=$(tail -c +"$(( _off + 1 ))" "$_file" 2>/dev/null | head -n "$_n" | wc -c)
+    else
+        _c=$(head -n "$_n" "$_file" 2>/dev/null | wc -c)
+    fi
+    _c=${_c//[^0-9]/}
+    [ -n "$_c" ] || return 0
+    PT_SCAN_OFFSET=$(( _off + 10#$_c ))
+    PT_SCAN_LINES=$(( _lines + 10#$_n ))
 }
 
-_SCAN_NAME="${TRANSCRIPT##*/}"
+_SCAN_NAME="${TRANSCRIPT##*[/\\]}"
 _SCAN_NAME="${_SCAN_NAME%.jsonl}"
 if [ -z "${_SCAN_NAME#.}" ] || [ -z "${_SCAN_NAME#..}" ] \
     || [ "${_SCAN_NAME#-}" != "$_SCAN_NAME" ] \
     || [[ "$_SCAN_NAME" == *[!A-Za-z0-9._-]* ]]; then
     _SCAN_NAME=""
+fi
+if [ -z "$_SCAN_NAME" ] && [ -n "$TRANSCRIPT" ]; then
+    _SCAN_NOTICE="$REMEMBER_DIR/tmp/transcript-scan-unnamed"
+    _SCAN_NOTICE_LAST=""
+    [ -f "$_SCAN_NOTICE" ] && read -r _SCAN_NOTICE_LAST < "$_SCAN_NOTICE" 2>/dev/null
+    if [ "$_SCAN_NOTICE_LAST" != "$TRANSCRIPT" ]; then
+        log "hook" "WARNING: transcript-scan cache disabled for $_pt_dq$TRANSCRIPT$_pt_dq -- its basename is not a usable cache name, so every tool call rescans the whole transcript (#1034)"
+        printf '%s\n' "$TRANSCRIPT" > "$_SCAN_NOTICE" 2>/dev/null
+    fi
 fi
 
 _SCAN_OFFSET=0
@@ -2164,7 +2195,7 @@ SAVE_TRIGGERED=""
 DELTA_THRESHOLD="${REMEMBER_DELTA_THRESHOLD:-50}"
 if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
   if [ -z "$SESSION_ID" ]; then
-    log "hook" "post-tool: transcript basename $_pt_dq${TRANSCRIPT##*/}$_pt_dq failed the session id sanitiser -- refusing to save rather than handing save-session.sh an empty id"
+    log "hook" "post-tool: transcript basename $_pt_dq${TRANSCRIPT##*[/\\]}$_pt_dq failed the session id sanitiser -- refusing to save rather than handing save-session.sh an empty id"
   else
     ALREADY_RUNNING=false
     if [ -f "$PID_FILE" ]; then
