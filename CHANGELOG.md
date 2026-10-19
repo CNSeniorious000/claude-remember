@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-10-19 — The directory listing can move again: icon removed, backup advice reworded
+
+### Removed
+
+- Removed the plugin icon for #1041 (`.claude-plugin/icon.png` and the `icon` line in
+  `plugin.json`) that v0.42.0 added for #865. Since that release, every version
+  has been held for review in the Anthropic plugin directory, with the finding
+  "Image or font file that the plugin's code could run"; v0.41.0, without the
+  icon, was not. The icon never showed in the directory anyway: the directory
+  picks a plugin's icon only the first time it is submitted, and remember was
+  submitted long before it had one. The directory now shows a "No icon" warning
+  again, which is expected and does not hold anything. See `docs/releasing.md`
+  (`ICON_MISSING`).
+- Compatibility: compatible - the icon was only read by the plugin directory;
+  Claude Code ignores it, so nothing changes for anyone using the plugin.
+
+### Fixed
+
+- The backup hook's advice to replace an old haiku sign-in value that an earlier version committed to the backup store no longer names that setting or the command that makes one. The advice is the same; the names were what made the Claude directory flag the plugin as reading a credential from your machine (#1041).
+
 ## [0.43.2] - 2026-10-18 — The Windows PostToolUse stall on long sessions
 
 ### Fixed
@@ -4850,7 +4870,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.43.2...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.44.0...HEAD
+[0.44.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.44.0
 [0.43.2]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.43.2
 [0.43.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.43.1
 [0.43.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.43.0
