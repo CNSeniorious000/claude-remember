@@ -92,17 +92,12 @@ else
 fi
 
 _remember_normalize_win_path() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local _in="$1" _drive="" _rest=""
     local _re='^([a-zA-Z]):[/\](.*)$'
     if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
-        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
-            _drive="${BASH_REMATCH[1]}"
-            _rest="${BASH_REMATCH[2]}"
-        elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-            _drive="${BASH_REMATCH[1]}"
-            _rest="${BASH_REMATCH[2]}"
-        elif [[ "$_in" =~ $_re ]]; then
+        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]] || [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]] \
+            || [[ "$_in" =~ $_re ]]; then
             _drive="${BASH_REMATCH[1]}"
             _rest="${BASH_REMATCH[2]}"
         fi
@@ -148,6 +143,7 @@ export PIPELINE_DIR
 }
 __remember_src_detect_tools() {
 :
+
 _REMEMBER_TOOLS_CACHE="${TMPDIR:-/tmp}/remember-detect-tools-cache"
 
 _jq_fallback() {
@@ -163,134 +159,8 @@ _jq_fallback() {
     _remember_run_python "$_jq_fb_dir/jq_fallback_get.py" "$_jq_file" "$_jq_query" 2>/dev/null
 }
 
-_remember_tools_cache_load() {
-    [ "${REMEMBER_TOOLS_CACHE:-1}" = "1" ] || return 1
-    local _f="$_REMEMBER_TOOLS_CACHE"
-    [ -f "$_f" ] || return 1
-    [ -L "$_f" ] && return 1
-    [ -O "$_f" ] || return 1
-    [ -r "$_f" ] || return 1
-    local _line _path="" _py="" _jq=""
-    while IFS= read -r _line || [ -n "$_line" ]; do
-        _line="${_line%$'\r'}"
-        [ -n "$_line" ] || continue
-        if [ "${_line#CACHE_PATH=}" != "$_line" ]; then
-            _path="${_line#*=}"
-        elif [ "${_line#PYTHON=}" != "$_line" ]; then
-            _py="${_line#*=}"
-        elif [ "${_line#JQ=}" != "$_line" ]; then
-            _jq="${_line#*=}"
-        else
-            return 1
-        fi
-    done < "$_f"
-    [ -n "$_py" ] || return 1
-    [ -n "$_jq" ] || return 1
-    [ -n "$_path" ] || return 1
-    [ "$_path" = "$PATH" ] || return 1
-    if [ "$_jq" != jq ] && [ "$_jq" != _jq_fallback ]; then
-        return 1
-    fi
-    PYTHON="$_py"
-    JQ="$_jq"
-    export PYTHON JQ
-    return 0
-}
-
-_remember_tools_cache_publish() {
-    [ "${REMEMBER_TOOLS_CACHE:-1}" = "1" ] || return 0
-    local _f="$_REMEMBER_TOOLS_CACHE" _t
-    _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
-    {
-        printf 'CACHE_PATH=%s\n' "$PATH"
-        printf 'PYTHON=%s\n' "$PYTHON"
-        printf 'JQ=%s\n' "$JQ"
-    } > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
-    mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
-    return 0
-}
-
-if _remember_tools_cache_load; then
-    _remember_python() { [ -n "${PYTHON:-}" ]; }
-else
-
-if [ "${_REMEMBER_LAZY_PYTHON:-0}" = "1" ]; then
-    PYTHON=""
-    _remember_python() {
-        [ -n "${PYTHON:-}" ] && return 0
-        local _candidate _first _probe_status _probe_report=""
-        for _candidate in "python3" "python" "py -3" "py"; do
-            _first="${_candidate%% *}"
-            if ! command -v "$_first" >/dev/null 2>&1; then
-                _probe_report="$_probe_report
-  $_candidate: not on PATH"
-                continue
-            fi
-            if $_candidate -V >/dev/null 2>&1; then
-                PYTHON="$_candidate"
-                break
-            else
-                _probe_status=$?
-            fi
-            _probe_report="$_probe_report
-  $_candidate: on PATH ($(command -v "$_first" 2>/dev/null)), '-V' exit $_probe_status"
-        done
-        unset _probe_status
-        if [ -z "$PYTHON" ]; then
-            echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install the official Python release (not the Microsoft Store one) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
-            echo "  PATH searched: $PATH" >&2
-            echo "  per-candidate (exit 49 = Microsoft Store placeholder, not a real interpreter):$_probe_report" >&2
-            unset _probe_report
-            return 1
-        fi
-        unset _probe_report
-        export PYTHON
-        _remember_tools_cache_publish
-        return 0
-    }
-else
-    PYTHON=""
-    _probe_report=""
-    for _candidate in "python3" "python" "py -3" "py"; do
-        _first="${_candidate%% *}"
-        if ! command -v "$_first" >/dev/null 2>&1; then
-            _probe_report="$_probe_report
-  $_candidate: not on PATH"
-            continue
-        fi
-        if $_candidate -V >/dev/null 2>&1; then
-            PYTHON="$_candidate"
-            break
-        else
-            _probe_status=$?
-        fi
-        _probe_report="$_probe_report
-  $_candidate: on PATH ($(command -v "$_first" 2>/dev/null)), '-V' exit $_probe_status"
-    done
-    unset _probe_status
-    if [ -z "$PYTHON" ]; then
-        echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install the official Python release (not the Microsoft Store one) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
-        echo "  PATH searched: $PATH" >&2
-        echo "  per-candidate (exit 49 = Microsoft Store placeholder, not a real interpreter):$_probe_report" >&2
-        unset _probe_report
-        exit 1
-    fi
-    unset _probe_report
-    export PYTHON
-    _remember_python() { [ -n "${PYTHON:-}" ]; }
-fi
-
-if command -v jq >/dev/null 2>&1; then
-    JQ="jq"
-else
-    JQ="_jq_fallback"
-fi
-export JQ
-
-if [ "${_REMEMBER_LAZY_PYTHON:-0}" != "1" ]; then
-    _remember_tools_cache_publish
-fi
-fi
+_REMEMBER_PY_FLOOR_MAJOR=3
+_REMEMBER_PY_FLOOR_MINOR=9
 
 _remember_run_python() {
     if [ "$PYTHON" = python3 ]; then
@@ -301,11 +171,107 @@ _remember_run_python() {
         py -3 "$@"
     elif [ "$PYTHON" = py ]; then
         py "$@"
+    elif [[ "$PYTHON" == python3.[0-9]* ]]; then
+        command "$PYTHON" "$@"
     else
         echo "FATAL: _remember_run_python: unrecognized PYTHON value '$PYTHON'" >&2
         return 127
     fi
 }
+
+_py_ok() {
+    [[ "$1" =~ ([0-9]+)\.([0-9]+) ]] || return 1
+    (( ${BASH_REMATCH[1]}*100+${BASH_REMATCH[2]} >= _REMEMBER_PY_FLOOR_MAJOR*100+_REMEMBER_PY_FLOOR_MINOR ))
+}
+
+_remember_tools_cache_load() {
+    [ "${REMEMBER_TOOLS_CACHE:-1}" = "1" ] || return 1
+    local _f="$_REMEMBER_TOOLS_CACHE"
+    [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
+    local _line _path="" _py="" _jq="" _pf=""
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line="${_line%$'\r'}"
+        [ -n "$_line" ] || continue
+        if [ "${_line#CACHE_PATH=}" != "$_line" ]; then
+            _path="${_line#*=}"
+        elif [ "${_line#PYTHON=}" != "$_line" ]; then
+            _py="${_line#*=}"
+        elif [ "${_line#JQ=}" != "$_line" ]; then
+            _jq="${_line#*=}"
+        elif [ "${_line#PYFLOOR=}" != "$_line" ]; then
+            _pf="${_line#*=}"
+        else
+            return 1
+        fi
+    done < "$_f"
+    [[ -n $_py && -n $_jq && -n $_pf ]] || return 1
+    [ -n "$_path" ] && [ "$_path" = "$PATH" ] || return 1
+    [ "$_jq" = jq ] || [ "$_jq" = _jq_fallback ] || return 1
+    PYTHON="$_py"
+    JQ="$_jq"
+    export PYTHON JQ
+    return 0
+}
+
+_remember_tools_cache_publish() {
+    [ "${REMEMBER_TOOLS_CACHE:-1}" = "1" ] || return 0
+    local _f="$_REMEMBER_TOOLS_CACHE" _t
+    _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
+    printf '%s=%s\n' CACHE_PATH "$PATH" PYTHON "$PYTHON" JQ "$JQ" PYFLOOR 1 \
+        > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
+    mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
+    return 0
+}
+
+if _remember_tools_cache_load; then
+    _remember_python() { [ -n "${PYTHON:-}" ]; }
+else
+
+PYTHON=""
+_remember_python() {
+    [ -n "${PYTHON:-}" ] && return 0
+    local _c _ps _pr="" _bl="" _v
+    for _c in "python3" "python" "py -3" "py" python3.{13..9}; do
+        if ! command -v "${_c%% *}" >/dev/null 2>&1; then
+            _pr="$_pr
+$_c: -"
+            continue
+        fi
+        _v=$(PYTHON="$_c" _remember_run_python -V 2>&1)
+        _ps=$?
+        if [ "$_ps" -ne 0 ]; then
+            _pr="$_pr
+$_c: exit $_ps"
+            continue
+        fi
+        if _py_ok "$_v"; then
+            PYTHON="$_c"
+            break
+        fi
+        _bl="$_bl$_c $_v"
+    done
+    if [ -z "$PYTHON" ]; then
+        [ -n "$_bl" ] && echo "FATAL: below the floor this plugin supports:$_bl" >&2 \
+            || echo "FATAL: No working Python found $PATH$_pr" >&2
+        return 1
+    fi
+    export PYTHON
+    _remember_tools_cache_publish
+    return 0
+}
+
+if command -v jq >/dev/null 2>&1; then
+    JQ="jq"
+else
+    JQ="_jq_fallback"
+fi
+export JQ
+
+if [ "${_REMEMBER_LAZY_PYTHON:-0}" != "1" ]; then
+    _remember_python || exit 1
+fi
+fi
+
 
 
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
@@ -360,10 +326,8 @@ _remember_build_slug_sed
 
 
 _remember_should_check_utf8() {
-    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] && return 0
     local _os="${OSTYPE:-}"
-    [ "${_os#linux}" != "$_os" ] && return 0
-    return 1
+    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] || [ "${_os#linux}" != "$_os" ]
 }
 
 _REMEMBER_DRIVE_UPPER="ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -457,146 +421,40 @@ SYS_TMPDIR="${TMPDIR:-/tmp}"
 _mem_proj="${MEMORY_PROJECT_DIR:-}"
 [ -n "$_mem_proj" ] || _mem_proj="$PROJECT_DIR"
 _legacy_dir="${_mem_proj}/.remember"
-_remember_legacy_migration_refused=""
-if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_legacy_dir" ] && [ ! -e "$REMEMBER_DIR" ]; then
-    _migrating_user_config_home=false
-    if [ -n "$HOME" ]; then
-        if [ "${_mem_proj%/}" = "${HOME%/}" ]; then
-            _migrating_user_config_home=true
-        else
-            _mem_proj_real=$(cd "$_mem_proj" 2>/dev/null && pwd -P)
-            _home_real=$(cd "$HOME" 2>/dev/null && pwd -P)
-            if [ -n "$_mem_proj_real" ] && [ "$_mem_proj_real" = "$_home_real" ]; then
-                _migrating_user_config_home=true
-            fi
-            unset _mem_proj_real _home_real
-        fi
-    fi
-
-    if [ "$_migrating_user_config_home" = false ]; then
-        mkdir -p "$(dirname "$REMEMBER_DIR")" 2>/dev/null
-
-        _legacy_other_tracked="clean"
-        if command -v git >/dev/null 2>&1; then
-            _legacy_repo_check=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-                                    LC_ALL=C LANGUAGE=C git -C "$_mem_proj" rev-parse --is-inside-work-tree) 2>&1 ) && _legacy_repo_rc=0 || _legacy_repo_rc=$?
-            if [ "$_legacy_repo_rc" -ne 0 ]; then
-                if [ "${_legacy_repo_check#*not a git repository}" = "$_legacy_repo_check" ]; then
-                    _legacy_other_tracked="could-not-tell"
-                fi
-            elif [ "$_legacy_repo_check" = "true" ]; then
-                _legacy_ls_list=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-                                   git -c core.quotePath=false -C "$_mem_proj" ls-files -- ":(icase).remember/" 2>/dev/null) && _legacy_ls_rc=0 || _legacy_ls_rc=$?
-                if [ "$_legacy_ls_rc" -ne 0 ]; then
-                    _legacy_other_tracked="could-not-tell"
-                else
-                    while IFS= read -r _legacy_ls_line; do
-                        [ -n "$_legacy_ls_line" ] || continue
-                        _legacy_was_nocasematch=0
-                        shopt -q nocasematch && _legacy_was_nocasematch=1
-                        shopt -s nocasematch
-                        if [[ "$_legacy_ls_line" == ".remember/config.json" ]]; then
-                            _legacy_ci_match=1
-                        else
-                            _legacy_ci_match=0
-                        fi
-                        [ "$_legacy_was_nocasematch" -eq 1 ] || shopt -u nocasematch
-                        [ "$_legacy_ci_match" -eq 1 ] && continue
-                        _legacy_other_tracked="tracked"
-                    done <<< "$_legacy_ls_list"
-                fi
-            fi
-        else
-            _legacy_walk=$(cd "$_mem_proj" 2>/dev/null && pwd -P) || _legacy_walk="$_mem_proj"
-            while [ -n "$_legacy_walk" ]; do
-                if [ -e "$_legacy_walk/.git" ]; then
-                    _legacy_other_tracked="could-not-tell"
-                    break
-                fi
-                [ "$_legacy_walk" = "/" ] && break
-                _legacy_walk="${_legacy_walk%/*}"
-                [ -z "$_legacy_walk" ] && _legacy_walk="/"
-            done
-            unset _legacy_walk
-        fi
-        unset _legacy_ls_list _legacy_ls_line _legacy_repo_check _legacy_repo_rc _legacy_ls_rc _legacy_was_nocasematch _legacy_ci_match
-
-        if [ "$_legacy_other_tracked" != "clean" ]; then
-            _remember_legacy_migration_refused="1"
-            printf 'remember: %s contains git-tracked content beyond config.json (%s) -- refusing to migrate it into the external memory store, which would launder repository-committed content into a location the injection guard trusts unconditionally (#782). Left in place, untouched; move your own files out of it by hand, or `git rm --cached` whatever the repository should not have committed, then start a new session to retry.\n' \
-                "$_legacy_dir" "$_legacy_other_tracked" >&2
-        fi
-    fi
-    if [ "$_migrating_user_config_home" = false ] && [ "${_legacy_other_tracked:-clean}" = "clean" ]; then
-        _legacy_cfg="$_legacy_dir/config.json"
-        _legacy_cfg_holdout=""
-        if [ -e "$_legacy_cfg" ] || [ -L "$_legacy_cfg" ]; then
-            _legacy_cfg_tracked_answer=$(_remember_config_tracked_status "$_mem_proj" ".remember/config.json") || true
-            if [ "$_legacy_cfg_tracked_answer" != untracked ]; then
-                _legacy_cfg_holdout=$(mktemp "${SYS_TMPDIR:-/tmp}/remember-legacy-cfg-XXXXXX" 2>/dev/null) || _legacy_cfg_holdout=""
-                if [ -n "$_legacy_cfg_holdout" ]; then
-                    mv "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null || _legacy_cfg_holdout=""
-                fi
-            fi
-            unset _legacy_cfg_tracked_answer
-        fi
-
-        if mv "$_legacy_dir" "$REMEMBER_DIR" 2>/dev/null; then
-            mkdir -p "$_legacy_dir"
-            if [ -n "$_legacy_cfg_holdout" ] && { [ -e "$_legacy_cfg_holdout" ] || [ -L "$_legacy_cfg_holdout" ]; }; then
-                if mv "$_legacy_cfg_holdout" "$_legacy_cfg" 2>/dev/null; then
-                    printf 'Memory data migrated to:\n  %s\nThis directory is now empty; you may delete it.\n\nconfig.json was NOT migrated: it is tracked by this repository git\nindex (or its git status could not be determined, which this treats the\nsame way) -- treating it as your own trusted config would let a cloned\nrepo choose the summarizer credential, model, or refusal-gate settings\nyour memory pipeline runs with (#757). Left behind here, still doing\nnothing for the external store above. Put your own settings in\n%s/config.json instead.\n' \
-                        "$REMEMBER_DIR" "$REMEMBER_DIR" > "$_legacy_dir/MIGRATED-TO.txt"
-                    printf 'remember: %s is tracked by this repository git index (or its git status could not be determined); left behind rather than migrated into the trusted external config store (#757)\n' \
-                        "$_legacy_cfg" >&2
-                    _legacy_cfg_holdout=""
-                else
-                    printf 'Memory data migrated to:\n  %s\nconfig.json could NOT be restored to %s after migration --\nsee the error logged to stderr; it still exists at the path named there\nand was not deleted.\n' \
-                        "$REMEMBER_DIR" "$_legacy_cfg" > "$_legacy_dir/MIGRATED-TO.txt"
-                    printf 'remember: FAILED to restore %s from its holdout copy -- your config.json was NOT deleted, it is still sitting at %s; move it back to %s by hand. (#757)\n' \
-                        "$_legacy_cfg" "$_legacy_cfg_holdout" "$_legacy_cfg" >&2
-                fi
-            else
-                printf 'Memory data migrated to:\n  %s\nThis directory is now empty; you may delete it.\n' \
-                    "$REMEMBER_DIR" > "$_legacy_dir/MIGRATED-TO.txt"
-            fi
-        elif [ -n "$_legacy_cfg_holdout" ] && { [ -e "$_legacy_cfg_holdout" ] || [ -L "$_legacy_cfg_holdout" ]; }; then
-            if mv "$_legacy_cfg_holdout" "$_legacy_cfg" 2>/dev/null; then
-                _legacy_cfg_holdout=""
-            else
-                printf 'remember: FAILED to restore %s after the migration move itself failed -- your config.json was NOT deleted, it is still sitting at %s; move it back to %s by hand. (#757)\n' \
-                    "$_legacy_cfg" "$_legacy_cfg_holdout" "$_legacy_cfg" >&2
-            fi
-        fi
-        unset _legacy_cfg _legacy_cfg_holdout
-    fi
-    unset _migrating_user_config_home _legacy_other_tracked
-elif [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ -L "$_legacy_dir" ] && [ ! -e "$REMEMBER_DIR" ]; then
-    printf 'remember: %s is a symlink -- refusing to migrate it; left in place untouched. Move or replace it by hand if this was not intentional. (#757)\n' \
-        "$_legacy_dir" >&2
+_legacy_rd="$REMEMBER_DIR"
+if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+    _legacy_dir="${_legacy_dir//\\//}"
+    _legacy_rd="${_legacy_rd//\\//}"
 fi
-unset _legacy_dir
+if [ "$_legacy_rd" != "$_legacy_dir" ] && [ "${_legacy_rd#"$_legacy_dir"/}" = "$_legacy_rd" ] \
+    && [ ! -e "$REMEMBER_DIR" ] && [ -d "$_legacy_dir" ]; then
+    for _legacy_f in now.md recent.md archive.md core-memories.md remember.md; do
+        if [ -f "$_legacy_dir/$_legacy_f" ]; then
+            printf 'remember: %s holds memory data but data_dir points to %s -- move it by hand (see /remember:doctor)\n' \
+                "$_legacy_dir" "$REMEMBER_DIR" >&2
+            break
+        fi
+    done
+    unset _legacy_f
+fi
+unset _legacy_dir _legacy_rd
 
-if [ -z "$_remember_legacy_migration_refused" ] && { [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; }; then
+if [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; then
     mkdir -p \
         "$REMEMBER_DIR/tmp" \
         "$REMEMBER_DIR/logs" \
         "$REMEMBER_DIR/logs/autonomous" \
         2>/dev/null
 fi
-unset _remember_legacy_migration_refused
 
 if [ -d "$REMEMBER_DIR/tmp" ]; then
-    _remember_stale_cfg_was_nullglob=0
-    shopt -q nullglob && _remember_stale_cfg_was_nullglob=1
-    shopt -s nullglob
-    _remember_stale_cfg_candidates=("$REMEMBER_DIR/tmp"/remember-config-*.json)
-    [ "$_remember_stale_cfg_was_nullglob" = 1 ] || shopt -u nullglob
-    if [ "${#_remember_stale_cfg_candidates[@]}" -gt 0 ]; then
+    for _remember_stale_cfg in "$REMEMBER_DIR/tmp"/remember-config-*.json; do
+        [ -e "$_remember_stale_cfg" ] || [ -L "$_remember_stale_cfg" ] || continue
         find "$REMEMBER_DIR/tmp" -maxdepth 1 -name 'remember-config-*.json' \
             -mmin +30 -exec rm -f {} + 2>/dev/null || true
-    fi
-    unset _remember_stale_cfg_candidates _remember_stale_cfg_was_nullglob
+        break
+    done
+    unset _remember_stale_cfg
 
     _remember_relocated_cfg="$REMEMBER_DIR/tmp/remember-config-$$.json"
     if [ -n "${REMEMBER_CONFIG:-}" ] && [ -f "$REMEMBER_CONFIG" ] \
@@ -639,17 +497,11 @@ if [ -d "$REMEMBER_DIR" ]; then
 fi
 unset _mem_proj _mem_bd_glob_dir _mem_bd_glob_proj
 
-_remember_bd_has_xtracefd=0
-if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] 2>/dev/null; then
-    _remember_bd_has_xtracefd=1
-elif [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] 2>/dev/null && [ "${BASH_VERSINFO[1]:-0}" -ge 1 ] 2>/dev/null; then
-    _remember_bd_has_xtracefd=1
-fi
 if [ -d "$REMEMBER_DIR/logs" ]; then
     _remember_bd_keep_fd2=""
     if [[ "$-" == *x* ]]; then
-        if [ "$_remember_bd_has_xtracefd" = "0" ]; then
-            _remember_bd_keep_fd2="an xtrace is running (this bash predates BASH_XTRACEFD, added in 4.1, so xtrace stays on fd 2 regardless of the variable)"
+        if ! { [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] || { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 1 ]; }; } 2>/dev/null; then
+            _remember_bd_keep_fd2="an xtrace is running and this bash (< 4.1) has no BASH_XTRACEFD, so it stays on fd 2"
         elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then
             _remember_bd_keep_fd2="an xtrace is running on fd 2"
         fi
@@ -663,7 +515,6 @@ if [ -d "$REMEMBER_DIR/logs" ]; then
     fi
     unset _remember_bd_keep_fd2
 fi
-unset _remember_bd_has_xtracefd
 
 }
 __remember_src_lib_memory_dir() {
@@ -677,6 +528,14 @@ _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 __remember_src_lib_slug ${1+"$@"}
 unset _REMEMBER_SRC_DIR
 
+
+_lmd_warn() {
+    if declare -F report_error >/dev/null 2>&1; then
+        report_error "lib-memory-dir" "$1"
+    else
+        printf '%s\n' "[lib-memory-dir] WARNING: $1" >&2
+    fi
+}
 
 _read_data_dir() {
     local cfg="$1"
@@ -720,7 +579,7 @@ _resolve_memory_project_dir() {
 }
 
 _resolve_remember_dir() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local data_dir="$1"
     local proj="$2"
 
@@ -736,7 +595,7 @@ _resolve_remember_dir() {
 }
 
 _set_store_root() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local data_dir="$1" prefix
     REMEMBER_STORE_ROOT=""
 
@@ -793,7 +652,7 @@ export REMEMBER_STORE_ROOT
 _project_cfg="${REMEMBER_DIR}/config.json"
 
 _classify_project_cfg_haiku_trust() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     if [ "${_data_dir_raw#/}" != "$_data_dir_raw" ] || [ "${_data_dir_raw#[~]}" != "$_data_dir_raw" ] \
         || [ "${_data_dir_raw#[A-Za-z]:[/\\]}" != "$_data_dir_raw" ]; then
         _project_cfg_haiku_untrusted=0
@@ -865,7 +724,7 @@ if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then
     if [ "$_project_cfg_tracked_answer" = untracked ]; then
         _project_cfg_model_reject_untrusted=0
     else
-        _project_cfg_model_reject_untrusted=1  # tracked or could-not-tell -> fail CLOSED
+        _project_cfg_model_reject_untrusted=1
     fi
     unset _project_cfg_tracked_answer
 fi
@@ -901,11 +760,7 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
             if [ -n "$_project_sanitized_tmp" ] && jq -c "del($_project_del_filter)" "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then
                 _jq_merge_sources+=("$_project_sanitized_tmp")
             else
-                if declare -F report_error >/dev/null 2>&1; then
-                    report_error "lib-memory-dir" "sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies"
-                else
-                    printf '%s\n' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies" >&2
-                fi
+                _lmd_warn "sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies"
                 [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
                 _project_sanitized_tmp=""
             fi
@@ -929,40 +784,19 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     _project_drop_marker=$(mktemp "${SYS_TMPDIR}/remember-config-drop-marker-XXXXXX" 2>/dev/null) || _project_drop_marker=""
     rm -f "$_project_drop_marker" 2>/dev/null
     _py_merge_rc=0
-    _lmd_run_python() {
-        if [ "${PYTHON:-python3}" = python3 ]; then
-            python3 "$@"
-        elif [ "${PYTHON:-python3}" = python ]; then
-            python "$@"
-        elif [ "${PYTHON:-python3}" = "py -3" ]; then
-            py -3 "$@"
-        elif [ "${PYTHON:-python3}" = py ]; then
-            py "$@"
-        else
-            return 127
-        fi
-    }
     _lmd_py_dir="${BASH_SOURCE[0]%/*}"
     [ "$_lmd_py_dir" = "${BASH_SOURCE[0]}" ] && _lmd_py_dir="$(pwd)"
-    _lmd_run_python "$_lmd_py_dir/cfg_merge.py" "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 || _py_merge_rc=$?
+    _remember_slug_run_python "$_lmd_py_dir/cfg_merge.py" "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 || _py_merge_rc=$?
     unset _lmd_py_dir
     if [ "$_py_merge_rc" != "0" ] && [ "$_py_merge_rc" != "3" ] && [ "$_py_merge_rc" != "4" ] && [ "$_py_merge_rc" != "5" ]; then
         cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
     fi
     if { [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; } || [ "$_py_merge_rc" = "3" ] || [ "$_py_merge_rc" = "5" ]; then
         rm -f "$_project_drop_marker" 2>/dev/null
-        if declare -F report_error >/dev/null 2>&1; then
-            report_error "lib-memory-dir" "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"
-        else
-            printf '%s\n' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies" >&2
-        fi
+        _lmd_warn "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"
     fi
     if [ "$_py_merge_rc" = "4" ] || [ "$_py_merge_rc" = "5" ]; then
-        if declare -F report_error >/dev/null 2>&1; then
-            report_error "lib-memory-dir" "sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied"
-        else
-            printf '%s\n' "[lib-memory-dir] WARNING: sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied" >&2
-        fi
+        _lmd_warn "sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied"
     fi
     [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null
 else
@@ -996,14 +830,22 @@ if [ -z "${PIPELINE_DIR:-}" ]; then
     fi
 fi
 
-_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
+_remember_log_src_dir="${BASH_SOURCE[0]%/*}"
+[ "$_remember_log_src_dir" = "${BASH_SOURCE[0]}" ] && _remember_log_src_dir="$(pwd)"
 __remember_src_lib_memory_dir ${1+"$@"}
-unset _REMEMBER_SRC_DIR
 
 
 REMEMBER_LOG_DIR="${REMEMBER_DIR}/logs"
-if [ ! -d "$REMEMBER_LOG_DIR" ] && ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
+_remember_log_dir_unsafe() {
+    local LC_ALL=C
+    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]]; } \
+        || [[ "$REMEMBER_DIR" == *$'\n'* || "$REMEMBER_DIR" == *$'\r'* ]]
+}
+_REMEMBER_LOG_SINK=""
+if _remember_log_dir_unsafe; then
+    echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
+    _REMEMBER_LOG_SINK=/dev/null
+elif [ ! -d "$REMEMBER_LOG_DIR" ] && ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
     echo "FATAL: cannot create $REMEMBER_LOG_DIR" >&2
     return 1 2>/dev/null || true
 fi
@@ -1033,21 +875,19 @@ _remember_cfg_table_get_into() {
 }
 
 _config_is_private_path() {
-    if [ "$1" = .haiku ] || [ "${1#.haiku.}" != "$1" ]; then
-        return 0
-    fi
-    return 1
+    [ "$1" = .haiku ] || [ "${1#.haiku.}" != "$1" ]
 }
 
 
 
 _remember_cfg_flatten_cache_path() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     [ -n "${REMEMBER_DIR:-}" ] || return 1
     local _slug="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
     [ "${#_slug}" -gt 120 ] && _slug="${_slug: -120}"
     printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_slug}"
 }
+
 
 _remember_cfg_flatten_cache_sources() {
     printf '%s\n' "${PIPELINE_DIR:-}/config.json"
@@ -1056,21 +896,17 @@ _remember_cfg_flatten_cache_sources() {
 }
 
 _remember_cfg_flatten_cache_is_standard_merge() {
-    local _cfg_path="${REMEMBER_CONFIG:-}"
-    if [[ "$_cfg_path" == */remember-config-* ]]; then
-        return 0
-    fi
-    return 1
+    [[ "${REMEMBER_CONFIG:-}" == */remember-config-* ]]
 }
 
 _remember_cfg_flatten_cache_valid_value() {
     local _value="$1"
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     [[ "$_value" =~ ^([^\\]|\\[\\nrt])*$ ]]
 }
 
 _remember_cfg_flatten_cache_valid_line() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local _line="$1"
     [[ "$_line" =~ ^_RCFG_[A-Za-z0-9_]+$'\t' ]] || return 1
     _remember_cfg_flatten_cache_valid_value "${_line#*$'\t'}"
@@ -1094,78 +930,67 @@ _remember_cfg_flatten_q_decode() {
     printf -v "$1" '%b' "$2"
 }
 
+_remember_cfg_flatten_cache_exists_into() {
+    local _src _sources _m=""
+    _sources=$(_remember_cfg_flatten_cache_sources)
+    while IFS= read -r _src; do
+        [ -n "$_src" ] || continue
+        if [ -e "$_src" ]; then
+            _m="${_m}1"
+            [ -z "${2:-}" ] || [ "$2" -nt "$_src" ] || return 1
+        else
+            _m="${_m}0"
+        fi
+    done <<< "$_sources"
+    printf -v "$1" '%s' "$_m"
+}
+
 _remember_cfg_flatten_cache_load() {
     [ "${REMEMBER_CONFIG_CACHE:-1}" = "1" ] || return 1
     _remember_cfg_flatten_cache_is_standard_merge || return 1
     local _f
     _f=$(_remember_cfg_flatten_cache_path) || return 1
-    [ -f "$_f" ] || return 1
-    [ -L "$_f" ] && return 1
-    [ -O "$_f" ] || return 1
-    [ -r "$_f" ] || return 1
-    local _src _sources _exists_now=""
-    _sources=$(_remember_cfg_flatten_cache_sources)
-    while IFS= read -r _src; do
-        [ -n "$_src" ] || continue
-        if [ -e "$_src" ]; then
-            _exists_now="${_exists_now}1"
-            [ "$_f" -nt "$_src" ] || return 1
-        else
-            _exists_now="${_exists_now}0"
-        fi
-    done <<< "$_sources"
+    [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
+    local _exists_now=""
+    _remember_cfg_flatten_cache_exists_into _exists_now "$_f" || return 1
 
-    local _line _lines=() _stage=0 _identity_raw="" _exists_raw=""
+    local _line _lines=() _stage=0 _identity_raw="" _exists_raw="" _bad=""
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
         if [ "$_stage" = "0" ]; then
             _stage=1
-            if [ "${_line#'#REMEMBER_DIR='}" != "$_line" ]; then
-                _identity_raw="${_line#'#REMEMBER_DIR='}"
-                _remember_cfg_flatten_cache_valid_value "$_identity_raw" || {
-                    rm -f "$_f" 2>/dev/null
-                    return 1
-                }
-                continue
-            else
-                rm -f "$_f" 2>/dev/null
-                return 1
-            fi
-        fi
-        if [ "$_stage" = "1" ]; then
+            _identity_raw="${_line#'#REMEMBER_DIR='}"
+            [ "$_identity_raw" != "$_line" ] \
+                && _remember_cfg_flatten_cache_valid_value "$_identity_raw" || { _bad=1; break; }
+        elif [ "$_stage" = "1" ]; then
             _stage=2
-            if [ "${_line#'#RCFG_EXISTS='}" != "$_line" ]; then
-                _exists_raw="${_line#'#RCFG_EXISTS='}"
-                if [[ "$_exists_raw" == *[!01]* ]] || [ -z "$_exists_raw" ]; then
-                    rm -f "$_f" 2>/dev/null
-                    return 1
-                fi
-                continue
-            else
-                rm -f "$_f" 2>/dev/null
-                return 1
+            _exists_raw="${_line#'#RCFG_EXISTS='}"
+            [ "$_exists_raw" != "$_line" ] || { _bad=1; break; }
+            if [[ "$_exists_raw" == *[!01]* ]] || [ -z "$_exists_raw" ]; then
+                _bad=1
+                break
             fi
+        elif _remember_cfg_flatten_cache_valid_line "$_line"; then
+            _lines[${#_lines[@]}]="$_line"
+        else
+            _bad=1
+            break
         fi
-        if ! _remember_cfg_flatten_cache_valid_line "$_line"; then
-            rm -f "$_f" 2>/dev/null
-            return 1
-        fi
-        _lines[${#_lines[@]}]="$_line"
     done < "$_f"
-    [ "$_stage" = "2" ] || { rm -f "$_f" 2>/dev/null; return 1; }
+    if [ -n "$_bad" ] || [ "$_stage" != "2" ]; then
+        rm -f "$_f" 2>/dev/null
+        return 1
+    fi
 
     [ "$_exists_raw" = "$_exists_now" ] || return 1
 
     local _identity
-    _remember_cfg_flatten_q_decode _identity "$_identity_raw" || {
+    if ! _remember_cfg_flatten_q_decode _identity "$_identity_raw" \
+        || [ "$_identity" != "${REMEMBER_DIR:-}" ]; then
         rm -f "$_f" 2>/dev/null
         return 1
-    }
-    [ "$_identity" = "${REMEMBER_DIR:-}" ] || {
-        rm -f "$_f" 2>/dev/null
-        return 1
-    }
+    fi
 
     local _assign _assign_name _assign_value _assign_decoded
     for _assign in ${_lines[@]+"${_lines[@]}"}; do
@@ -1191,16 +1016,8 @@ _remember_cfg_flatten_cache_publish() {
     [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
     local _t
     _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
-    local _k _v _src _sources _exists_now=""
-    _sources=$(_remember_cfg_flatten_cache_sources)
-    while IFS= read -r _src; do
-        [ -n "$_src" ] || continue
-        if [ -e "$_src" ]; then
-            _exists_now="${_exists_now}1"
-        else
-            _exists_now="${_exists_now}0"
-        fi
-    done <<< "$_sources"
+    local _k _v _exists_now=""
+    _remember_cfg_flatten_cache_exists_into _exists_now
     {
         local _encoded_dir
         _remember_cfg_flatten_q_encode _encoded_dir "${REMEMBER_DIR:-}"
@@ -1214,6 +1031,10 @@ _remember_cfg_flatten_cache_publish() {
         done <<< "$_dump"
     } > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
     mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
+    local _f_dir="${_f%/*}"
+    local _f_base="${_f##*/}"
+    local _f_v1="${_f_dir}/${_f_base/-v2-/-}"
+    [ -f "$_f_v1" ] && rm -f "$_f_v1" 2>/dev/null
     return 0
 }
 
@@ -1229,16 +1050,13 @@ _config_load() {
         return 0
     fi
 
-    local _dump="" _rc=0
+    local _dump="" _rc=0 _cfg_flatten_dir="${BASH_SOURCE[0]%/*}"
+    [ "$_cfg_flatten_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_dir="$(pwd)"
     if command -v jq >/dev/null 2>&1; then
-        local _cfg_flatten_jq_dir="${BASH_SOURCE[0]%/*}"
-        [ "$_cfg_flatten_jq_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_jq_dir="$(pwd)"
-        _dump=$(jq -r -f "$_cfg_flatten_jq_dir/cfg_flatten.jq" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        _dump=$(jq -r -f "$_cfg_flatten_dir/cfg_flatten.jq" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     else
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
-        local _cfg_flatten_dir="${BASH_SOURCE[0]%/*}"
-        [ "$_cfg_flatten_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_dir="$(pwd)"
-        _dump=$(_remember_log_run_python "$_cfg_flatten_dir/cfg_flatten.py" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        _dump=$(_remember_slug_run_python "$_cfg_flatten_dir/cfg_flatten.py" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     fi
 
     if [ "$_rc" -ne 0 ]; then
@@ -1269,19 +1087,6 @@ config() {
     printf '%s\n' "$_cfg_result"
 }
 
-_remember_log_run_python() {
-    if [ "${PYTHON:-python3}" = python3 ]; then
-        python3 "$@"
-    elif [ "${PYTHON:-python3}" = python ]; then
-        python "$@"
-    elif [ "${PYTHON:-python3}" = "py -3" ]; then
-        py -3 "$@"
-    elif [ "${PYTHON:-python3}" = py ]; then
-        py "$@"
-    else
-        return 127
-    fi
-}
 
 config_into() {
     local _cfg_into_var="$1"
@@ -1290,7 +1095,7 @@ config_into() {
 
     if ! ( LC_ALL=C; [[ "$_cfg_into_name" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]] ); then
         [ "${REMEMBER_DEBUG:-}" = "1" ] && \
-            echo "remember: config() key '$_cfg_into_name' is not a plain dotted path -- returning the default rather than looking it up" >&2
+            echo "remember: config() key '$_cfg_into_name' is not a plain dotted path -- returning the default" >&2
         printf -v "$_cfg_into_var" '%s' "$_cfg_into_default"
         return
     fi
@@ -1325,7 +1130,7 @@ config_into() {
     else
         local _cfg_py_dir="${BASH_SOURCE[0]%/*}"
         [ "$_cfg_py_dir" = "${BASH_SOURCE[0]}" ] && _cfg_py_dir="$(pwd)"
-        _cfg_into_val=$(_remember_log_run_python "$_cfg_py_dir/jq_fallback_get.py" "$REMEMBER_CONFIG" "$_cfg_into_name")
+        _cfg_into_val=$(_remember_slug_run_python "$_cfg_py_dir/jq_fallback_get.py" "$REMEMBER_CONFIG" "$_cfg_into_name")
     fi
     [ -n "$_cfg_into_val" ] || _cfg_into_val="$_cfg_into_default"
     printf -v "$_cfg_into_var" '%s' "$_cfg_into_val"
@@ -1343,12 +1148,13 @@ if [ "$REMEMBER_PROMPT_STAMP" != stable ] && [ "$REMEMBER_PROMPT_STAMP" != off ]
 fi
 export REMEMBER_PROMPT_STAMP
 
+_remember_is_uint() { [[ -n "$1" && "$1" != *[!0-9]* ]]; }
 config_into REMEMBER_SAVE_COOLDOWN ".cooldowns.save_seconds" 120
-if [ -z "$REMEMBER_SAVE_COOLDOWN" ] || [ "${REMEMBER_SAVE_COOLDOWN#*[!0-9]}" != "$REMEMBER_SAVE_COOLDOWN" ]; then REMEMBER_SAVE_COOLDOWN=120; fi
+_remember_is_uint "$REMEMBER_SAVE_COOLDOWN" || REMEMBER_SAVE_COOLDOWN=120
 export REMEMBER_SAVE_COOLDOWN
 
 config_into REMEMBER_DELTA_THRESHOLD ".thresholds.delta_lines_trigger" 50
-if [ -z "$REMEMBER_DELTA_THRESHOLD" ] || [ "${REMEMBER_DELTA_THRESHOLD#*[!0-9]}" != "$REMEMBER_DELTA_THRESHOLD" ]; then REMEMBER_DELTA_THRESHOLD=50; fi
+_remember_is_uint "$REMEMBER_DELTA_THRESHOLD" || REMEMBER_DELTA_THRESHOLD=50
 export REMEMBER_DELTA_THRESHOLD
 
 [ -n "${REMEMBER_MODEL:-}" ] || config_into REMEMBER_MODEL ".model" "haiku"
@@ -1356,14 +1162,16 @@ export REMEMBER_MODEL
 [ -n "${REMEMBER_REJECT_PATTERN:-}" ] || config_into REMEMBER_REJECT_PATTERN ".reject_pattern" ""
 export REMEMBER_REJECT_PATTERN
 
-_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
 __remember_src_lib_clock ${1+"$@"}
-unset _REMEMBER_SRC_DIR
+unset _remember_log_src_dir
 
 MEMORY_LOG_DATE=""
 _remember_date_into MEMORY_LOG_DATE +%Y-%m-%d
-MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+if [ -n "$_REMEMBER_LOG_SINK" ]; then
+    MEMORY_LOG_FILE="$_REMEMBER_LOG_SINK"
+else
+    MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+fi
 
 _REMEMBER_LOG_LAST_TIME=""
 _remember_date_into _REMEMBER_LOG_LAST_TIME +%H:%M:%S
@@ -1389,13 +1197,16 @@ log() {
     fi
     if [ "$_remember_log_rolled" = 1 ]; then
         _remember_date_into MEMORY_LOG_DATE +%Y-%m-%d
-        MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+        if [ -n "$_REMEMBER_LOG_SINK" ]; then
+            MEMORY_LOG_FILE="$_REMEMBER_LOG_SINK"
+        else
+            MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+        fi
     fi
     _REMEMBER_LOG_LAST_TIME="$timestamp"
     [ -n "$_REMEMBER_LOG_LAST_EPOCH" ] && _REMEMBER_LOG_LAST_EPOCH="$EPOCHSECONDS"
-    message="$(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
-    echo "${timestamp} [${component}] ${message}" >> "$MEMORY_LOG_FILE" 2>/dev/null \
-        || echo "${timestamp} [${component}] ${message}" >&2
+    message="${timestamp} [${component}] $(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
+    echo "$message" >> "$MEMORY_LOG_FILE" 2>/dev/null || echo "$message" >&2
 }
 
 

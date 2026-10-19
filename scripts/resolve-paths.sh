@@ -41,17 +41,12 @@ else
 fi
 
 _remember_normalize_win_path() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local _in="$1" _drive="" _rest=""
     local _re='^([a-zA-Z]):[/\](.*)$'
     if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
-        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
-            _drive="${BASH_REMATCH[1]}"
-            _rest="${BASH_REMATCH[2]}"
-        elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-            _drive="${BASH_REMATCH[1]}"
-            _rest="${BASH_REMATCH[2]}"
-        elif [[ "$_in" =~ $_re ]]; then
+        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]] || [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]] \
+            || [[ "$_in" =~ $_re ]]; then
             _drive="${BASH_REMATCH[1]}"
             _rest="${BASH_REMATCH[2]}"
         fi

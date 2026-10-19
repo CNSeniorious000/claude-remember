@@ -22,9 +22,7 @@ _lock_self_set() {
     sh -c 'echo $PPID' > "$_probe" 2>/dev/null
     _LOCK_SELF=$(cat "$_probe" 2>/dev/null) || true
     rm -f "$_probe" 2>/dev/null || true
-    if [ -z "$_LOCK_SELF" ] || [ "${_LOCK_SELF#*[!0-9]}" != "$_LOCK_SELF" ]; then
-        _LOCK_SELF="$$"
-    fi
+    [ -n "$_LOCK_SELF" ] && [[ "$_LOCK_SELF" != *[!0-9]* ]] || _LOCK_SELF="$$"
     return 0
 }
 
@@ -37,9 +35,7 @@ _lock_try_steal() {
         for _abandoned in "${_dir}"/pid.stealing.*; do
             [ -e "$_abandoned" ] || continue
             _owner="${_abandoned##*.}"
-            if [[ "$_owner" == *[!0-9]* ]]; then
-                continue
-            fi
+            [[ "$_owner" == *[!0-9]* ]] && continue
             kill -0 "$_owner" 2>/dev/null && continue
             if [ ! -e "${_dir}/pid" ]; then
                 mv "$_abandoned" "${_dir}/pid" 2>/dev/null || true
@@ -51,10 +47,7 @@ _lock_try_steal() {
 
     _pid=$(cat "${_dir}/pid" 2>/dev/null) || true
 
-    [ -z "$_pid" ] && return 1
-    if [[ "$_pid" == *[!0-9]* ]]; then
-        return 1
-    fi
+    [ -n "$_pid" ] && [[ "$_pid" != *[!0-9]* ]] || return 1
     kill -0 "$_pid" 2>/dev/null && return 1
 
     mv "${_dir}/pid" "$_claim" 2>/dev/null || return 1
@@ -75,12 +68,8 @@ _LOCK_ADOPT_AFTER="${_LOCK_ADOPT_AFTER:-30}"
 _lock_dir_age() {
     local _mtime _now
     _mtime=$(stat -c %Y "$1" 2>/dev/null) || _mtime=""
-    if [ -z "$_mtime" ] || [ "${_mtime#*[!0-9]}" != "$_mtime" ]; then
-        _mtime=$(stat -f %m "$1" 2>/dev/null) || _mtime=""
-    fi
-    if [ -z "$_mtime" ] || [ "${_mtime#*[!0-9]}" != "$_mtime" ]; then
-        echo 0; return 0
-    fi
+    [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]] || _mtime=$(stat -f %m "$1" 2>/dev/null) || _mtime=""
+    [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]] || { echo 0; return 0; }
     _now=$(date +%s)
     echo $(( _now - 10#$_mtime ))
 }
@@ -124,11 +113,7 @@ _LOCK_TIMING_IDX=-1
 _lock_timing_has_ns_date() {
     local _n
     _n=$(date +%s%N 2>/dev/null) || return 1
-    if [ -z "$_n" ] || [ "${_n#*[!0-9]}" != "$_n" ]; then
-        return 1
-    fi
-    [ "${#_n}" -ge 16 ] || return 1
-    return 0
+    [ -n "$_n" ] && [ "${_n#*[!0-9]}" = "$_n" ] && [ "${#_n}" -ge 16 ]
 }
 
 if [ "$_LOCK_TIMING" = 1 ]; then
@@ -214,7 +199,7 @@ _lock_timing_disclose() {
 }
 
 _lock_timing_slot() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     _LOCK_TIMING_SLOT="${1//[!A-Za-z0-9]/_}"
 }
 
@@ -295,7 +280,7 @@ lock_acquire() {
 }
 
 _lock_acquire_impl() {
-    local _dir="$1" _timeout="${2:-0}" _deadline _legacy
+    local _dir="$1" _timeout="${2:-0}" _deadline
     _deadline=$(( $(date +%s) + _timeout ))
 
     mkdir -p "$(dirname "$_dir")" 2>/dev/null || true
@@ -307,16 +292,7 @@ _lock_acquire_impl() {
             return 0
         fi
 
-        if [ -f "$_dir" ]; then
-            _legacy=$(cat "$_dir" 2>/dev/null) || true
-            if [ -z "$_legacy" ] || [ "${_legacy#*[!0-9]}" != "$_legacy" ]; then
-                rm -f "$_dir" 2>/dev/null || true; continue
-            fi
-            if ! kill -0 "$_legacy" 2>/dev/null; then
-                rm -f "$_dir" 2>/dev/null || true
-                continue
-            fi
-        elif { [ -e "$_dir" ] || [ -L "$_dir" ]; } && [ ! -d "$_dir" ]; then
+        if { [ -e "$_dir" ] || [ -L "$_dir" ]; } && [ ! -d "$_dir" ]; then
             rm -f "$_dir" 2>/dev/null || true
             continue
         elif _lock_try_steal "$_dir"; then

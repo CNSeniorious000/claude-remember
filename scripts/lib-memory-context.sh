@@ -65,6 +65,16 @@ _remember_wc_size_get_into() {
     done
     printf -v "$_remember_wc_size_outvar" '%s' ''
 }
+_remember_wc_size_batch() {
+    [ "$#" -gt 0 ] || return 0
+    local _remember_wc_bytes _remember_wc_path
+    while read -r _remember_wc_bytes _remember_wc_path; do
+        if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
+        [ "$_remember_wc_path" = "total" ] && continue
+        _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
+    done < <(wc -c "$@")
+    return 0
+}
 
 
 _remember_ci_eq() {
@@ -112,7 +122,7 @@ _remember_repo_root_walk_into() {
             break
         fi
     done
-    printf -v "$_rrw_outvar" '%s' ''  # not an empty format: see above
+    printf -v "$_rrw_outvar" '%s' ''
     return 1
 }
 
@@ -262,7 +272,7 @@ _remember_may_inject() {
     local _mi_file="$1" _mi_component="${2:-memory-context}" _mi_state
     _REMEMBER_INJECT_REFUSAL=""
     if [ -L "$_mi_file" ]; then
-        _REMEMBER_INJECT_REFUSAL="$_mi_file is a symlink -- refusing to follow it into session context. This plugin never creates a symlink inside a memory store; if you did not create this one, treat it as planted and inspect what it points at before deleting it."
+        _REMEMBER_INJECT_REFUSAL="$_mi_file is a symlink -- refusing to follow it into session context. This plugin never creates one; inspect where it points before deleting it."
         log "$_mi_component" "refused injecting $_mi_file: symlink"
         return 1
     fi
@@ -270,13 +280,13 @@ _remember_may_inject() {
     _remember_file_tracked_state_into _mi_state "$_mi_file"
     if _remember_tracked_state_is_refused "$_mi_state"; then
         if [ "$_mi_state" = tracked ]; then
-            _REMEMBER_INJECT_REFUSAL="$_mi_file is tracked by this repository's own git index. This plugin never commits a memory file itself (.remember/.gitignore excludes the whole directory), so a tracked one was shipped by the repository, not written by your own /remember. Not injecting it. If it is genuinely yours: git rm --cached it. If you did not add it: delete it and consider what else the commit that added it changed."
+            _REMEMBER_INJECT_REFUSAL="$_mi_file is tracked by this repository's git index; this plugin never commits memory files, so the repository shipped it. Not injecting it. Yours: git rm --cached it. Not yours: delete it and check the commit that added it."
             log "$_mi_component" "refused injecting $_mi_file: git-tracked"
         elif [ "$_mi_state" = unavailable ]; then
-            _REMEMBER_INJECT_REFUSAL="$_mi_file could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing rather than injecting unverified. Run /remember:doctor to see why git could not be asked."
+            _REMEMBER_INJECT_REFUSAL="$_mi_file could not be checked against this repository's git index -- refusing rather than injecting unverified (/remember:doctor shows why)."
             log "$_mi_component" "refused injecting $_mi_file: git status unavailable"
         elif [ "$_mi_state" = symlinked-ancestor ]; then
-            _REMEMBER_INJECT_REFUSAL="$_mi_file sits under a directory that is itself a symlink -- refusing to follow it into session context. This plugin never creates a symlink inside a memory store; if you did not create this one, treat it as planted and inspect what it points at before deleting it."
+            _REMEMBER_INJECT_REFUSAL="$_mi_file sits under a symlinked directory -- refusing to follow it into session context. This plugin never creates one; inspect where it points."
             log "$_mi_component" "refused injecting $_mi_file: symlinked ancestor directory"
         else
             _REMEMBER_INJECT_REFUSAL="$_mi_file could not be verified (tracked state: $_mi_state) -- refusing rather than injecting unverified."
@@ -302,6 +312,20 @@ _remember_emit_file() {
     local _remember_file_body=""
     IFS= read -r -d '' _remember_file_body < "$1" || :
     printf '%s' "$_remember_file_body"
+}
+
+_remember_print_sized() {
+    local _rps_f _rps_b
+    [ "$#" -gt 0 ] || return 0
+    _remember_wc_size_batch "$@"
+    for _rps_f in "$@"; do
+        _remember_wc_size_get_into _rps_b "$_rps_f"
+        if [ -z "$_rps_b" ] || [ -n "${_rps_b//[0-9]/}" ]; then
+            printf '%s (size unknown)\n' "$_rps_f"
+        else
+            printf '%s (%s bytes)\n' "$_rps_f" "$_rps_b"
+        fi
+    done
 }
 
 _remember_render_memory_section() {
@@ -335,7 +359,7 @@ _remember_render_memory_section() {
     local REFUSED_MEMORY=""
     local _remember_nl
     printf -v _remember_nl '\n'
-    local _remember_present=() _remember_wc_bytes _remember_wc_path
+    local _remember_present=()
     for MFILE in "${MEMORY_FILES[@]}"; do
         if [ -f "$MFILE" ] && [ -s "$MFILE" ]; then
             if [ "${SESSION_START_SOURCE:-}" = "compact" ] && [ "$MFILE" != "$IDENTITY_FILE" ]; then
@@ -348,13 +372,7 @@ _remember_render_memory_section() {
             fi
         fi
     done
-    if [ "${#_remember_present[@]}" -gt 0 ]; then
-        while read -r _remember_wc_bytes _remember_wc_path; do
-            if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
-            [ "$_remember_wc_path" = "total" ] && continue
-            _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
-        done < <(wc -c "${_remember_present[@]}")
-    fi
+    [ "${#_remember_present[@]}" -gt 0 ] && _remember_wc_size_batch "${_remember_present[@]}"
     [ "${#_remember_present[@]}" -gt 0 ] && for MFILE in "${_remember_present[@]}"; do
             _remember_wc_size_get_into MFILE_BYTES "$MFILE"
             if [ "${MFILE_BYTES#*[!0-9]}" != "$MFILE_BYTES" ]; then MFILE_BYTES=""; fi
@@ -411,22 +429,8 @@ _remember_render_memory_section() {
 "
             fi
         done
-        if [ "${#_remember_deferred[@]}" -gt 0 ]; then
-            while read -r _remember_wc_bytes _remember_wc_path; do
-                if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
-                [ "$_remember_wc_path" = "total" ] && continue
-                _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
-            done < <(wc -c "${_remember_deferred[@]}")
-        fi
         DEFERRED_MEMORY=""
-        [ "${#_remember_deferred[@]}" -gt 0 ] && DEFERRED_MEMORY=$(for MFILE in "${_remember_deferred[@]}"; do
-            _remember_wc_size_get_into MFILE_BYTES "$MFILE"
-            if [ -z "$MFILE_BYTES" ] || [[ "$MFILE_BYTES" == *[!0-9]* ]]; then
-                printf '%s (size unknown)\n' "$MFILE"
-            else
-                printf '%s (%s bytes)\n' "$MFILE" "$MFILE_BYTES"
-            fi
-        done)
+        [ "${#_remember_deferred[@]}" -gt 0 ] && DEFERRED_MEMORY=$(_remember_print_sized "${_remember_deferred[@]}")
         if [ -n "$_remember_deferred_refused" ]; then
             echo "--- refused, would have been listed as deferred (not injected) ---"
             printf '%s' "$_remember_deferred_refused"
@@ -466,22 +470,7 @@ _remember_render_memory_section() {
 "
             fi
         done <<< "$ROTATED_NEWEST"
-        if [ "${#_remember_newest_arr[@]}" -gt 0 ]; then
-            local _remember_newest_bytes
-            while read -r _remember_wc_bytes _remember_wc_path; do
-                if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
-                [ "$_remember_wc_path" = "total" ] && continue
-                _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
-            done < <(wc -c "${_remember_newest_arr[@]}")
-            for _remember_newest_line in "${_remember_newest_arr[@]}"; do
-                _remember_wc_size_get_into _remember_newest_bytes "$_remember_newest_line"
-                if [ -z "$_remember_newest_bytes" ] || [ -n "${_remember_newest_bytes//[0-9]/}" ]; then
-                    printf '%s (size unknown)\n' "$_remember_newest_line"
-                else
-                    printf '%s (%s bytes)\n' "$_remember_newest_line" "$_remember_newest_bytes"
-                fi
-            done
-        fi
+        [ "${#_remember_newest_arr[@]}" -eq 0 ] || _remember_print_sized "${_remember_newest_arr[@]}"
         if [ -n "$_remember_newest_refused" ]; then
             echo ""
             echo "--- refused, not listed as a rotated slice (not injected) ---"
@@ -517,14 +506,10 @@ _remember_start_cache_context_load() {
     [ -n "${REMEMBER_DIR:-}" ] || return 1
     local _cache="$REMEMBER_DIR/tmp/start-context.cache"
     local _manifest="$REMEMBER_DIR/tmp/start-context.manifest"
-    [ -f "$_cache" ] || return 1
-    [ -f "$_manifest" ] || return 1
-    [ -L "$_cache" ] && return 1
-    [ -O "$_cache" ] || return 1
-    [ -r "$_cache" ] || return 1
-    [ -L "$_manifest" ] && return 1
-    [ -O "$_manifest" ] || return 1
-    [ -r "$_manifest" ] || return 1
+    local _f
+    for _f in "$_cache" "$_manifest"; do
+        [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
+    done
     _remember_may_inject "$_cache" "start-cache" || return 1
     _remember_may_inject "$_manifest" "start-cache" || return 1
 
@@ -553,9 +538,11 @@ _remember_start_cache_context_load() {
 
 _remember_start_cache_context_finish_publish() {
     local _tmp_cache="$1"
-    [ "${REMEMBER_START_CACHE:-1}" = "1" ] || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }
-    [ "${SESSION_START_SOURCE:-}" != "compact" ] || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }
-    [ -n "${REMEMBER_DIR:-}" ] || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }
+    if [ "${REMEMBER_START_CACHE:-1}" != "1" ] || [ "${SESSION_START_SOURCE:-}" = "compact" ] \
+        || [ -z "${REMEMBER_DIR:-}" ]; then
+        rm -f "$_tmp_cache" 2>/dev/null
+        return 0
+    fi
     [ -f "$_tmp_cache" ] || return 0
     local _dir="$REMEMBER_DIR/tmp"
     mkdir -p "$_dir" 2>/dev/null || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }
@@ -598,7 +585,7 @@ _remember_apply_session_start_budget() {
     local _outvar="$1" _max="$2" _text="$3"
     if [ -z "$_max" ] || [ "${_max#*[!0-9]}" != "$_max" ]; then return 0; fi
     [ "$_max" -gt 0 ] || return 0
-    local LC_ALL=C  # byte length, not a locale-dependent character count (see header above)
+    local LC_ALL=C
     [ "${#_text}" -gt "$_max" ] || return 0
 
     local _mem _head_len _head _exclude="" _path _next
@@ -606,7 +593,7 @@ _remember_apply_session_start_budget() {
     [ -n "$_mem" ] || return 0
     _head_len=$(( ${#_text} - ${#_mem} ))
     if [ "$_head_len" -lt 0 ] || [ "${_text:$_head_len}" != "$_mem" ]; then
-        log "memory-context" "WARNING: session_start_max_bytes: the MEMORY section changed between render and budget check -- injected as rendered, over budget"
+        log "memory-context" "WARNING: session_start_max_bytes: MEMORY section changed before the budget check -- injected as rendered, over budget"
         return 0
     fi
     _head="${_text:0:$_head_len}"
@@ -621,7 +608,7 @@ _remember_apply_session_start_budget() {
         _mem="$_next"
     done
     if [ $(( _head_len + ${#_mem} )) -gt "$_max" ]; then
-        log "memory-context" "WARNING: thresholds.session_start_max_bytes: still over budget ($(( _head_len + ${#_mem} )) bytes > ${_max}) after dropping every droppable section"
+        log "memory-context" "WARNING: thresholds.session_start_max_bytes: still over budget ($(( _head_len + ${#_mem} )) > ${_max} bytes) with every droppable section dropped"
     fi
     printf -v "$_outvar" %s "${_head}${_mem}"
 }

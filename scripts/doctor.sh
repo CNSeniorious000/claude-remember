@@ -207,6 +207,13 @@ else
     _PY_DISPLAY="$_PY_PATH"
     [ -n "$_PY_DISPLAY" ] || _PY_DISPLAY="$_PY_FIRST"
     echo "OK   python: $PYTHON -> $_PY_DISPLAY ($_PY_VERSION)"
+    if command -v _py_ok >/dev/null 2>&1 \
+        && ! _py_ok "$_PY_VERSION"; then
+        echo "WARN python: $_PY_VERSION is below this plugin's supported floor"
+        echo "     (${_REMEMBER_PY_FLOOR_MAJOR}.${_REMEMBER_PY_FLOOR_MINOR}) -- consolidation needs zoneinfo (stdlib only"
+        echo "     since 3.9) and will crash even though capture above reports OK"
+        echo "     (#1003). Install a newer Python."
+    fi
 
     if command -v jq >/dev/null 2>&1; then
         _JQ_PATH=$(command -v jq)
@@ -226,6 +233,21 @@ if [ "$REMEMBER_DIR" = "${PROJECT_DIR}/.remember" ] \
 else
     echo "OK   Storage mode: external ($REMEMBER_DIR)"
 fi
+
+_legacy_store="${MEMORY_PROJECT_DIR:-}"
+[ -n "$_legacy_store" ] || _legacy_store="$PROJECT_DIR"
+_remember_forward_slash_into _legacy_store "$_legacy_store/.remember"
+_remember_forward_slash_into _legacy_rd "$REMEMBER_DIR"
+if [ "$_legacy_rd" != "$_legacy_store" ] && [ "${_legacy_rd#"$_legacy_store"/}" = "$_legacy_rd" ]; then
+    for _legacy_f in now.md recent.md archive.md core-memories.md remember.md; do
+        if [ -f "$_legacy_store/$_legacy_f" ]; then
+            echo "WARN Legacy store: $_legacy_store still holds memory data ($_legacy_f); data_dir now points to $REMEMBER_DIR"
+            echo "     Move the memory files there by hand, then remove $_legacy_store (nothing moves them automatically since #898)."
+            break
+        fi
+    done
+fi
+unset _legacy_store _legacy_rd _legacy_f
 
 if [ -f "$REMEMBER_CONFIG" ] && [ -s "$REMEMBER_CONFIG" ]; then
     echo "OK   config.json: parsed (merged from bundled/user-global/per-project layers)"
@@ -593,6 +615,171 @@ if [ -f "$_ROTATE_STATE" ]; then
 else
     echo "OK   Log rotation: no failure recorded"
 fi
+echo ""
+
+echo "-- Consolidation health (#1003) --"
+_remember_ch_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+_CH_FILES=()
+for _ch_f in "$_remember_ch_glob_dir"/logs/memory-*.log; do
+    [ -f "$_ch_f" ] && _CH_FILES+=("$_ch_f")
+done
+_CH_LAST_LINE=""
+if [ "${#_CH_FILES[@]}" -gt 0 ]; then
+    _CH_OLD_IFS="$IFS"
+    IFS=$'\n'
+    _CH_SORTED=($(printf '%s\n' "${_CH_FILES[@]}" | LC_ALL=C sort))
+    IFS="$_CH_OLD_IFS"
+    unset _CH_OLD_IFS
+    for _ch_f in "${_CH_SORTED[@]}"; do
+        _ch_match=$(grep -E '\[consolidation\] (done|ERROR)' "$_ch_f" 2>/dev/null | tail -n 1)
+        [ -n "$_ch_match" ] && _CH_LAST_LINE="$_ch_match"
+    done
+    unset _CH_SORTED
+fi
+unset _CH_FILES _remember_ch_glob_dir _ch_f
+if [[ "$_CH_LAST_LINE" == *"[consolidation] ERROR"* ]]; then
+    echo "WARN Consolidation's last recorded attempt failed, and no later attempt has"
+    echo "     succeeded since -- memory may still be captured (see Capture health"
+    echo "     above) while consolidation stays silently broken. Last entry:"
+    echo "     $_CH_LAST_LINE"
+elif [[ "$_CH_LAST_LINE" == *"[consolidation] done"* ]]; then
+    echo "OK   Consolidation: last recorded attempt succeeded ($_CH_LAST_LINE)"
+else
+    echo "--   No consolidation attempt recorded yet in $REMEMBER_DIR/logs"
+fi
+unset _CH_LAST_LINE
+echo ""
+
+_remember_doctor_is_windows() {
+    local sys
+    sys="${OS:-}"
+    [ "$sys" = "Windows_NT" ] && return 0
+    sys="$(uname -s 2>/dev/null)"
+    [ "${sys#MINGW}" != "$sys" ] || [ "${sys#MSYS}" != "$sys" ] \
+        || [ "${sys#CYGWIN}" != "$sys" ]
+}
+
+_remember_doctor_run_powershell_file() {
+    local _ps_bin="" _ps_file="$1" _ps_timeout="${2:-15}" _ps_out_file _ps_pid _ps_watchdog _ps_sleep_pid_file _ps_sleep_real_pid _ps_rc _ps_out
+
+if command -v powershell.exe >/dev/null 2>&1; then
+        _ps_bin="powershell.exe"
+    elif command -v powershell >/dev/null 2>&1; then
+        _ps_bin="powershell"
+    else
+        return 1
+    fi
+    _ps_out_file=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-out.XXXXXX") || return 1
+
+    if command -v cygpath >/dev/null 2>&1; then
+        _ps_file="$(cygpath -w "$_ps_file" 2>/dev/null)" || _ps_file="$1"
+    fi
+
+"$_ps_bin" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$_ps_file" >"$_ps_out_file" 2>/dev/null &
+    _ps_pid=$!
+
+    _ps_sleep_pid_file=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-sleep.XXXXXX") || _ps_sleep_pid_file=""
+    (
+        sleep "$_ps_timeout" &
+        _ps_sleep_real_pid=$!
+        if [ -n "$_ps_sleep_pid_file" ]; then
+            printf '%s' "$_ps_sleep_real_pid" >"$_ps_sleep_pid_file" 2>/dev/null
+        fi
+        wait "$_ps_sleep_real_pid" 2>/dev/null
+        kill -9 "$_ps_pid" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    _ps_watchdog=$!
+    wait "$_ps_pid" 2>/dev/null
+    _ps_rc=$?
+    if [ -n "$_ps_sleep_pid_file" ] && [ ! -s "$_ps_sleep_pid_file" ]; then
+        sleep 1
+    fi
+    if [ -n "$_ps_sleep_pid_file" ] && [ -s "$_ps_sleep_pid_file" ]; then
+        kill "$(cat "$_ps_sleep_pid_file" 2>/dev/null)" 2>/dev/null
+    fi
+    rm -f "$_ps_sleep_pid_file" 2>/dev/null
+    kill "$_ps_watchdog" 2>/dev/null
+    wait "$_ps_watchdog" 2>/dev/null
+
+_ps_out=$(tr -d '\r' <"$_ps_out_file" 2>/dev/null | tr -d '[:space:]')
+    rm -f "$_ps_out_file"
+    if [ "$_ps_rc" -ne 0 ] || [ -z "$_ps_out" ]; then
+        return 1
+    fi
+    printf '%s' "$_ps_out"
+}
+
+_remember_doctor_fglock_build() {
+    local _ps_script
+    _ps_script=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-build.XXXXXX") || return 1
+    mv "$_ps_script" "${_ps_script}.ps1" 2>/dev/null && _ps_script="${_ps_script}.ps1"
+    printf '%s\n' '[Environment]::OSVersion.Version.Build' >"$_ps_script"
+    _remember_doctor_run_powershell_file "$_ps_script"
+    rm -f "$_ps_script"
+}
+
+_remember_doctor_fglock_timeout() {
+    local _ps_script
+    _ps_script=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-timeout.XXXXXX") || return 1
+    mv "$_ps_script" "${_ps_script}.ps1" 2>/dev/null && _ps_script="${_ps_script}.ps1"
+
+printf '%s\n' '$asmName = New-Object System.Reflection.AssemblyName("RememberFgAsm")' >"$_ps_script"
+    printf '%s\n' '$asmBuilder = [System.AppDomain]::CurrentDomain.DefineDynamicAssembly($asmName, [System.Reflection.Emit.AssemblyBuilderAccess]::Run)' >>"$_ps_script"
+    printf '%s\n' '$moduleBuilder = $asmBuilder.DefineDynamicModule("RememberFgMod")' >>"$_ps_script"
+    printf '%s\n' '$typeBuilder = $moduleBuilder.DefineType("RememberFg", [System.Reflection.TypeAttributes]::Public)' >>"$_ps_script"
+    printf '%s\n' '$paramTypes = [Type[]]@([uint32], [uint32], [uint32].MakeByRefType(), [uint32])' >>"$_ps_script"
+    printf '%s\n' '$methodAttrs = [System.Reflection.MethodAttributes]"Public,Static,PinvokeImpl"' >>"$_ps_script"
+    printf '%s\n' '$methodBuilder = $typeBuilder.DefinePInvokeMethod("SystemParametersInfo", "user32.dll", $methodAttrs, [System.Reflection.CallingConventions]::Standard, [bool], $paramTypes, [System.Runtime.InteropServices.CallingConvention]::Winapi, [System.Runtime.InteropServices.CharSet]::Auto)' >>"$_ps_script"
+    printf '%s\n' '$methodBuilder.SetImplementationFlags($methodBuilder.GetMethodImplementationFlags() -bor [System.Reflection.MethodImplAttributes]::PreserveSig)' >>"$_ps_script"
+    printf '%s\n' '$fgType = $typeBuilder.CreateType()' >>"$_ps_script"
+    printf '%s\n' '$fg = 0' >>"$_ps_script"
+    printf '%s\n' '$fgType::SystemParametersInfo(0x2000, 0, [ref]$fg, 0) | Out-Null' >>"$_ps_script"
+    printf '%s\n' 'Write-Output $fg' >>"$_ps_script"
+    _remember_doctor_run_powershell_file "$_ps_script"
+    rm -f "$_ps_script"
+}
+
+_FGLOCK_IS_WIN=0
+if _remember_doctor_is_windows; then
+    _FGLOCK_IS_WIN=1
+fi
+
+if [ "$_FGLOCK_IS_WIN" -eq 1 ]; then
+    echo "-- Windows foreground-lock check (#1011) --"
+    _FGLOCK_BUILD=$(_remember_doctor_fglock_build)
+
+    if [ -z "$_FGLOCK_BUILD" ] || [[ "$_FGLOCK_BUILD" == *[!0-9]* ]]; then
+        echo "WARN Could not determine the Windows build number (PowerShell unavailable,"
+        echo "     slow, or returned something unexpected) -- the #1011 kernel Token-leak"
+        echo "     check could not run. See docs/windows.md."
+    elif [ "$_FGLOCK_BUILD" -lt 26200 ]; then
+        echo "OK   Windows build $_FGLOCK_BUILD is not known-affected by #1011's kernel"
+        echo "     Token leak (confirmed from build 26200)"
+    else
+
+_FGLOCK_TIMEOUT=$(_remember_doctor_fglock_timeout)
+
+        if [ -z "$_FGLOCK_TIMEOUT" ] || [[ "$_FGLOCK_TIMEOUT" == *[!0-9]* ]]; then
+            echo "WARN Windows build $_FGLOCK_BUILD is known-affected by #1011's kernel Token"
+            echo "     leak, but the live foreground lock timeout could not be read"
+            echo "     (PowerShell unavailable, slow, or returned something unexpected) --"
+            echo "     cannot tell whether the opt-in workaround is applied. See docs/windows.md."
+        elif [ "$_FGLOCK_TIMEOUT" = "0" ]; then
+            echo "OK   Windows build $_FGLOCK_BUILD is known-affected by #1011's kernel Token"
+            echo "     leak, but the foreground lock timeout is already 0 (opt-in workaround applied)"
+        else
+            echo "WARN Windows build $_FGLOCK_BUILD is known-affected by #1011's kernel Token leak"
+            echo "     (one win32kfull.sys Token object per console-attached process start,"
+            echo "     freed only by a Restart) -- foreground lock timeout is $_FGLOCK_TIMEOUT, not"
+            echo "     0. This plugin's hooks spawn many such processes. An opt-in workaround,"
+            echo "     with a real trade-off, is in docs/windows.md; this plugin never applies"
+            echo "     it on its own."
+        fi
+        unset _FGLOCK_TIMEOUT
+    fi
+    unset _FGLOCK_BUILD
+fi
+unset _FGLOCK_IS_WIN
 echo ""
 
 _ASSUMED_NOTE=""

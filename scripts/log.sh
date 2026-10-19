@@ -8,14 +8,22 @@ if [ -z "${PIPELINE_DIR:-}" ]; then
     fi
 fi
 
-_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
-source "$_REMEMBER_SRC_DIR/lib-memory-dir.sh"
-unset _REMEMBER_SRC_DIR
+_remember_log_src_dir="${BASH_SOURCE[0]%/*}"
+[ "$_remember_log_src_dir" = "${BASH_SOURCE[0]}" ] && _remember_log_src_dir="$(pwd)"
+source "$_remember_log_src_dir/lib-memory-dir.sh"
 
 
 REMEMBER_LOG_DIR="${REMEMBER_DIR}/logs"
-if [ ! -d "$REMEMBER_LOG_DIR" ] && ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
+_remember_log_dir_unsafe() {
+    local LC_ALL=C
+    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]]; } \
+        || [[ "$REMEMBER_DIR" == *$'\n'* || "$REMEMBER_DIR" == *$'\r'* ]]
+}
+_REMEMBER_LOG_SINK=""
+if _remember_log_dir_unsafe; then
+    echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
+    _REMEMBER_LOG_SINK=/dev/null
+elif [ ! -d "$REMEMBER_LOG_DIR" ] && ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
     echo "FATAL: cannot create $REMEMBER_LOG_DIR" >&2
     return 1 2>/dev/null || true
 fi
@@ -45,20 +53,25 @@ _remember_cfg_table_get_into() {
 }
 
 _config_is_private_path() {
-    if [ "$1" = .haiku ] || [ "${1#.haiku.}" != "$1" ]; then
-        return 0
-    fi
-    return 1
+    [ "$1" = .haiku ] || [ "${1#.haiku.}" != "$1" ]
 }
 
 
 
 _remember_cfg_flatten_cache_path() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     [ -n "${REMEMBER_DIR:-}" ] || return 1
     local _slug="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
     [ "${#_slug}" -gt 120 ] && _slug="${_slug: -120}"
     printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_slug}"
+}
+
+_remember_cfg_flatten_cache_path_v1() {
+    local _v2 _dir _base
+    _v2=$(_remember_cfg_flatten_cache_path) || return 1
+    _dir="${_v2%/*}"
+    _base="${_v2##*/}"
+    printf '%s' "${_dir}/${_base/-v2-/-}"
 }
 
 _remember_cfg_flatten_cache_sources() {
@@ -68,21 +81,17 @@ _remember_cfg_flatten_cache_sources() {
 }
 
 _remember_cfg_flatten_cache_is_standard_merge() {
-    local _cfg_path="${REMEMBER_CONFIG:-}"
-    if [[ "$_cfg_path" == */remember-config-* ]]; then
-        return 0
-    fi
-    return 1
+    [[ "${REMEMBER_CONFIG:-}" == */remember-config-* ]]
 }
 
 _remember_cfg_flatten_cache_valid_value() {
     local _value="$1"
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     [[ "$_value" =~ ^([^\\]|\\[\\nrt])*$ ]]
 }
 
 _remember_cfg_flatten_cache_valid_line() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local _line="$1"
     [[ "$_line" =~ ^_RCFG_[A-Za-z0-9_]+$'\t' ]] || return 1
     _remember_cfg_flatten_cache_valid_value "${_line#*$'\t'}"
@@ -106,78 +115,67 @@ _remember_cfg_flatten_q_decode() {
     printf -v "$1" '%b' "$2"
 }
 
+_remember_cfg_flatten_cache_exists_into() {
+    local _src _sources _m=""
+    _sources=$(_remember_cfg_flatten_cache_sources)
+    while IFS= read -r _src; do
+        [ -n "$_src" ] || continue
+        if [ -e "$_src" ]; then
+            _m="${_m}1"
+            [ -z "${2:-}" ] || [ "$2" -nt "$_src" ] || return 1
+        else
+            _m="${_m}0"
+        fi
+    done <<< "$_sources"
+    printf -v "$1" '%s' "$_m"
+}
+
 _remember_cfg_flatten_cache_load() {
     [ "${REMEMBER_CONFIG_CACHE:-1}" = "1" ] || return 1
     _remember_cfg_flatten_cache_is_standard_merge || return 1
     local _f
     _f=$(_remember_cfg_flatten_cache_path) || return 1
-    [ -f "$_f" ] || return 1
-    [ -L "$_f" ] && return 1
-    [ -O "$_f" ] || return 1
-    [ -r "$_f" ] || return 1
-    local _src _sources _exists_now=""
-    _sources=$(_remember_cfg_flatten_cache_sources)
-    while IFS= read -r _src; do
-        [ -n "$_src" ] || continue
-        if [ -e "$_src" ]; then
-            _exists_now="${_exists_now}1"
-            [ "$_f" -nt "$_src" ] || return 1
-        else
-            _exists_now="${_exists_now}0"
-        fi
-    done <<< "$_sources"
+    [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
+    local _exists_now=""
+    _remember_cfg_flatten_cache_exists_into _exists_now "$_f" || return 1
 
-    local _line _lines=() _stage=0 _identity_raw="" _exists_raw=""
+    local _line _lines=() _stage=0 _identity_raw="" _exists_raw="" _bad=""
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
         if [ "$_stage" = "0" ]; then
             _stage=1
-            if [ "${_line#'#REMEMBER_DIR='}" != "$_line" ]; then
-                _identity_raw="${_line#'#REMEMBER_DIR='}"
-                _remember_cfg_flatten_cache_valid_value "$_identity_raw" || {
-                    rm -f "$_f" 2>/dev/null
-                    return 1
-                }
-                continue
-            else
-                rm -f "$_f" 2>/dev/null
-                return 1
-            fi
-        fi
-        if [ "$_stage" = "1" ]; then
+            _identity_raw="${_line#'#REMEMBER_DIR='}"
+            [ "$_identity_raw" != "$_line" ] \
+                && _remember_cfg_flatten_cache_valid_value "$_identity_raw" || { _bad=1; break; }
+        elif [ "$_stage" = "1" ]; then
             _stage=2
-            if [ "${_line#'#RCFG_EXISTS='}" != "$_line" ]; then
-                _exists_raw="${_line#'#RCFG_EXISTS='}"
-                if [[ "$_exists_raw" == *[!01]* ]] || [ -z "$_exists_raw" ]; then
-                    rm -f "$_f" 2>/dev/null
-                    return 1
-                fi
-                continue
-            else
-                rm -f "$_f" 2>/dev/null
-                return 1
+            _exists_raw="${_line#'#RCFG_EXISTS='}"
+            [ "$_exists_raw" != "$_line" ] || { _bad=1; break; }
+            if [[ "$_exists_raw" == *[!01]* ]] || [ -z "$_exists_raw" ]; then
+                _bad=1
+                break
             fi
+        elif _remember_cfg_flatten_cache_valid_line "$_line"; then
+            _lines[${#_lines[@]}]="$_line"
+        else
+            _bad=1
+            break
         fi
-        if ! _remember_cfg_flatten_cache_valid_line "$_line"; then
-            rm -f "$_f" 2>/dev/null
-            return 1
-        fi
-        _lines[${#_lines[@]}]="$_line"
     done < "$_f"
-    [ "$_stage" = "2" ] || { rm -f "$_f" 2>/dev/null; return 1; }
+    if [ -n "$_bad" ] || [ "$_stage" != "2" ]; then
+        rm -f "$_f" 2>/dev/null
+        return 1
+    fi
 
     [ "$_exists_raw" = "$_exists_now" ] || return 1
 
     local _identity
-    _remember_cfg_flatten_q_decode _identity "$_identity_raw" || {
+    if ! _remember_cfg_flatten_q_decode _identity "$_identity_raw" \
+        || [ "$_identity" != "${REMEMBER_DIR:-}" ]; then
         rm -f "$_f" 2>/dev/null
         return 1
-    }
-    [ "$_identity" = "${REMEMBER_DIR:-}" ] || {
-        rm -f "$_f" 2>/dev/null
-        return 1
-    }
+    fi
 
     local _assign _assign_name _assign_value _assign_decoded
     for _assign in ${_lines[@]+"${_lines[@]}"}; do
@@ -203,16 +201,8 @@ _remember_cfg_flatten_cache_publish() {
     [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
     local _t
     _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
-    local _k _v _src _sources _exists_now=""
-    _sources=$(_remember_cfg_flatten_cache_sources)
-    while IFS= read -r _src; do
-        [ -n "$_src" ] || continue
-        if [ -e "$_src" ]; then
-            _exists_now="${_exists_now}1"
-        else
-            _exists_now="${_exists_now}0"
-        fi
-    done <<< "$_sources"
+    local _k _v _exists_now=""
+    _remember_cfg_flatten_cache_exists_into _exists_now
     {
         local _encoded_dir
         _remember_cfg_flatten_q_encode _encoded_dir "${REMEMBER_DIR:-}"
@@ -226,6 +216,10 @@ _remember_cfg_flatten_cache_publish() {
         done <<< "$_dump"
     } > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
     mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
+    local _f_dir="${_f%/*}"
+    local _f_base="${_f##*/}"
+    local _f_v1="${_f_dir}/${_f_base/-v2-/-}"
+    [ -f "$_f_v1" ] && rm -f "$_f_v1" 2>/dev/null
     return 0
 }
 
@@ -241,16 +235,13 @@ _config_load() {
         return 0
     fi
 
-    local _dump="" _rc=0
+    local _dump="" _rc=0 _cfg_flatten_dir="${BASH_SOURCE[0]%/*}"
+    [ "$_cfg_flatten_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_dir="$(pwd)"
     if command -v jq >/dev/null 2>&1; then
-        local _cfg_flatten_jq_dir="${BASH_SOURCE[0]%/*}"
-        [ "$_cfg_flatten_jq_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_jq_dir="$(pwd)"
-        _dump=$(jq -r -f "$_cfg_flatten_jq_dir/cfg_flatten.jq" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        _dump=$(jq -r -f "$_cfg_flatten_dir/cfg_flatten.jq" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     else
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
-        local _cfg_flatten_dir="${BASH_SOURCE[0]%/*}"
-        [ "$_cfg_flatten_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_dir="$(pwd)"
-        _dump=$(_remember_log_run_python "$_cfg_flatten_dir/cfg_flatten.py" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        _dump=$(_remember_slug_run_python "$_cfg_flatten_dir/cfg_flatten.py" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     fi
 
     if [ "$_rc" -ne 0 ]; then
@@ -281,19 +272,6 @@ config() {
     printf '%s\n' "$_cfg_result"
 }
 
-_remember_log_run_python() {
-    if [ "${PYTHON:-python3}" = python3 ]; then
-        python3 "$@"
-    elif [ "${PYTHON:-python3}" = python ]; then
-        python "$@"
-    elif [ "${PYTHON:-python3}" = "py -3" ]; then
-        py -3 "$@"
-    elif [ "${PYTHON:-python3}" = py ]; then
-        py "$@"
-    else
-        return 127
-    fi
-}
 
 config_into() {
     local _cfg_into_var="$1"
@@ -302,7 +280,7 @@ config_into() {
 
     if ! ( LC_ALL=C; [[ "$_cfg_into_name" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]] ); then
         [ "${REMEMBER_DEBUG:-}" = "1" ] && \
-            echo "remember: config() key '$_cfg_into_name' is not a plain dotted path -- returning the default rather than looking it up" >&2
+            echo "remember: config() key '$_cfg_into_name' is not a plain dotted path -- returning the default" >&2
         printf -v "$_cfg_into_var" '%s' "$_cfg_into_default"
         return
     fi
@@ -337,7 +315,7 @@ config_into() {
     else
         local _cfg_py_dir="${BASH_SOURCE[0]%/*}"
         [ "$_cfg_py_dir" = "${BASH_SOURCE[0]}" ] && _cfg_py_dir="$(pwd)"
-        _cfg_into_val=$(_remember_log_run_python "$_cfg_py_dir/jq_fallback_get.py" "$REMEMBER_CONFIG" "$_cfg_into_name")
+        _cfg_into_val=$(_remember_slug_run_python "$_cfg_py_dir/jq_fallback_get.py" "$REMEMBER_CONFIG" "$_cfg_into_name")
     fi
     [ -n "$_cfg_into_val" ] || _cfg_into_val="$_cfg_into_default"
     printf -v "$_cfg_into_var" '%s' "$_cfg_into_val"
@@ -370,12 +348,13 @@ if [ "$REMEMBER_PROMPT_STAMP" != stable ] && [ "$REMEMBER_PROMPT_STAMP" != off ]
 fi
 export REMEMBER_PROMPT_STAMP
 
+_remember_is_uint() { [[ -n "$1" && "$1" != *[!0-9]* ]]; }
 config_into REMEMBER_SAVE_COOLDOWN ".cooldowns.save_seconds" 120
-if [ -z "$REMEMBER_SAVE_COOLDOWN" ] || [ "${REMEMBER_SAVE_COOLDOWN#*[!0-9]}" != "$REMEMBER_SAVE_COOLDOWN" ]; then REMEMBER_SAVE_COOLDOWN=120; fi
+_remember_is_uint "$REMEMBER_SAVE_COOLDOWN" || REMEMBER_SAVE_COOLDOWN=120
 export REMEMBER_SAVE_COOLDOWN
 
 config_into REMEMBER_DELTA_THRESHOLD ".thresholds.delta_lines_trigger" 50
-if [ -z "$REMEMBER_DELTA_THRESHOLD" ] || [ "${REMEMBER_DELTA_THRESHOLD#*[!0-9]}" != "$REMEMBER_DELTA_THRESHOLD" ]; then REMEMBER_DELTA_THRESHOLD=50; fi
+_remember_is_uint "$REMEMBER_DELTA_THRESHOLD" || REMEMBER_DELTA_THRESHOLD=50
 export REMEMBER_DELTA_THRESHOLD
 
 [ -n "${REMEMBER_MODEL:-}" ] || config_into REMEMBER_MODEL ".model" "haiku"
@@ -383,14 +362,16 @@ export REMEMBER_MODEL
 [ -n "${REMEMBER_REJECT_PATTERN:-}" ] || config_into REMEMBER_REJECT_PATTERN ".reject_pattern" ""
 export REMEMBER_REJECT_PATTERN
 
-_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
-source "$_REMEMBER_SRC_DIR/lib-clock.sh"
-unset _REMEMBER_SRC_DIR
+source "$_remember_log_src_dir/lib-clock.sh"
+unset _remember_log_src_dir
 
 MEMORY_LOG_DATE=""
 _remember_date_into MEMORY_LOG_DATE +%Y-%m-%d
-MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+if [ -n "$_REMEMBER_LOG_SINK" ]; then
+    MEMORY_LOG_FILE="$_REMEMBER_LOG_SINK"
+else
+    MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+fi
 
 _REMEMBER_LOG_LAST_TIME=""
 _remember_date_into _REMEMBER_LOG_LAST_TIME +%H:%M:%S
@@ -416,13 +397,16 @@ log() {
     fi
     if [ "$_remember_log_rolled" = 1 ]; then
         _remember_date_into MEMORY_LOG_DATE +%Y-%m-%d
-        MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+        if [ -n "$_REMEMBER_LOG_SINK" ]; then
+            MEMORY_LOG_FILE="$_REMEMBER_LOG_SINK"
+        else
+            MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+        fi
     fi
     _REMEMBER_LOG_LAST_TIME="$timestamp"
     [ -n "$_REMEMBER_LOG_LAST_EPOCH" ] && _REMEMBER_LOG_LAST_EPOCH="$EPOCHSECONDS"
-    message="$(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
-    echo "${timestamp} [${component}] ${message}" >> "$MEMORY_LOG_FILE" 2>/dev/null \
-        || echo "${timestamp} [${component}] ${message}" >&2
+    message="${timestamp} [${component}] $(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
+    echo "$message" >> "$MEMORY_LOG_FILE" 2>/dev/null || echo "$message" >&2
 }
 
 log_usage() {
@@ -546,7 +530,7 @@ report_error() {
 
 _dispatch_report_timeout() {
     local _event="$1" _name="$2" _budget="$3" _how="$4" _said="$5"
-    local _msg="WARNING: hook TIMED OUT: $_event/$_name did not return within ${_budget}s and was stopped ($_how). This is NOT a failure report from the hook -- it never answered, so whether it did its work is UNKNOWN, and anything it left half-done is its own to unwind. Raise hooks.dispatch_timeout_seconds if this listener is honestly slow, or 0 to disable the bound. It said: $_said"
+    local _msg="WARNING: hook TIMED OUT: $_event/$_name did not return within ${_budget}s and was stopped ($_how). Whether it did its work is UNKNOWN; this is not a failure report. Raise hooks.dispatch_timeout_seconds if it is honestly slow, or 0 to disable the bound. It said: $_said"
     _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
     log "dispatch" "$_msg"
     [ -d "$REMEMBER_DIR/logs" ] || return 0
@@ -619,13 +603,9 @@ dispatch() {
                 _budget=$(config '.hooks.dispatch_timeout_seconds' "$_DISPATCH_TIMEOUT_DEFAULT")
                 _DISPATCH_BUDGET_FALLBACK=$_DISPATCH_TIMEOUT_DEFAULT
             fi
-            if [ -z "$_budget" ] || [ "${_budget#*[!0-9]}" != "$_budget" ]; then
-                _budget=$_DISPATCH_BUDGET_FALLBACK
-            fi
+            if [ -z "$_budget" ] || [ "${_budget#*[!0-9]}" != "$_budget" ]; then _budget=$_DISPATCH_BUDGET_FALLBACK; fi
             _grace=$(config '.hooks.dispatch_kill_grace_seconds' "$_DISPATCH_KILL_GRACE_DEFAULT")
-            if [ -z "$_grace" ] || [ "${_grace#*[!0-9]}" != "$_grace" ]; then
-                _grace=$_DISPATCH_KILL_GRACE_DEFAULT
-            fi
+            if [ -z "$_grace" ] || [ "${_grace#*[!0-9]}" != "$_grace" ]; then _grace=$_DISPATCH_KILL_GRACE_DEFAULT; fi
         fi
         local hook_stat hook_uid hook_perm
         hook_stat=$(stat -c '%u %a' "$hook" 2>/dev/null || stat -f '%u %Lp' "$hook" 2>/dev/null || echo "")
@@ -644,7 +624,8 @@ dispatch() {
         if [ -z "$_err_file" ] && [ -z "$_err_unavailable" ]; then
             _err_file="$REMEMBER_DIR/tmp/dispatch-stderr.$event.$$"
             _out_file="$REMEMBER_DIR/tmp/dispatch-stdout.$event.$$"
-            [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
+            [ -n "$_REMEMBER_LOG_SINK" ] || [ -d "$REMEMBER_DIR/tmp" ] \
+                || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
             if ! : > "$_err_file" 2>/dev/null || ! : > "$_out_file" 2>/dev/null; then
                 _err_file=""
                 _out_file=""
@@ -655,46 +636,33 @@ dispatch() {
             fi
         fi
 
-        local _rc=0 _hpid=""
-        _DISPATCH_RC=0
-        _DISPATCH_TIMEDOUT=0
+        local _rc _said
         if [ -n "$_err_file" ]; then
             REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >"$_out_file" 2>"$_err_file" &
-            _hpid=$!
-            _dispatch_supervise "$_hpid" "$_budget" "$_grace" "$_to_file"
+            _dispatch_supervise "$!" "$_budget" "$_grace" "$_to_file"
             _rc=$_DISPATCH_RC
             _dispatch_stdout_relay "$_out_file" "$event" "${hook##*/}"
         else
             REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >/dev/null 2>/dev/null &
-            _hpid=$!
-            _dispatch_supervise "$_hpid" "$_budget" "$_grace" ""
+            _dispatch_supervise "$!" "$_budget" "$_grace" ""
             _rc=$_DISPATCH_RC
-            printf '%s%s/%s -- output NOT SHOWN: stdout could not be captured (no writable %s/tmp), so it was discarded rather than delivered unattributed ===\n' \
+            printf '%s%s/%s -- output NOT SHOWN: no writable %s/tmp to capture it, so it was discarded ===\n' \
                 "$_DISPATCH_FRAME" "$event" "${hook##*/}" "$REMEMBER_DIR"
         fi
 
-        if [ "$_DISPATCH_TIMEDOUT" -eq 1 ]; then
-            local _how="SIGTERM, then SIGKILL after ${_grace}s if it was still there"
-            [ -n "$_to_file" ] || _how="$_how; inferred from the exit status because $REMEMBER_DIR/tmp is not writable, so a hook that genuinely exited on this signal would look the same"
-            local _said
-            if [ -n "$_err_file" ]; then
-                _said=$(_dispatch_stderr_excerpt "$_err_file")
-            else
-                _said="nothing captured -- no writable $REMEMBER_DIR/tmp"
-            fi
-            _dispatch_report_timeout "$event" "${hook##*/}" "$_budget" "$_how" "$_said"
-            continue
-        fi
-
-        [ "$_rc" -eq 0 ] && continue
-
-        local _why
+        [ "$_DISPATCH_TIMEDOUT" -eq 1 ] || [ "$_rc" -ne 0 ] || continue
         if [ -n "$_err_file" ]; then
-            _why=$(_dispatch_stderr_excerpt "$_err_file")
+            _said=$(_dispatch_stderr_excerpt "$_err_file")
         else
-            _why="stderr not captured -- no writable $REMEMBER_DIR/tmp, so the reason is MISSING, not absent; rerun the hook by hand to see what it says"
+            _said="stderr not captured (no writable $REMEMBER_DIR/tmp); rerun the hook by hand to see it"
         fi
-        _dispatch_report_failure "$event" "${hook##*/}" "$_rc" "$_why"
+        if [ "$_DISPATCH_TIMEDOUT" -eq 1 ]; then
+            local _how="SIGTERM, then SIGKILL after ${_grace}s"
+            [ -n "$_to_file" ] || _how="$_how; inferred from the exit status (no writable tmp)"
+            _dispatch_report_timeout "$event" "${hook##*/}" "$_budget" "$_how" "$_said"
+        else
+            _dispatch_report_failure "$event" "${hook##*/}" "$_rc" "$_said"
+        fi
     done
     [ -z "$_err_file" ] || rm -f "$_err_file" "$_out_file" 2>/dev/null
     [ -z "$_to_file" ] || rm -f "$_to_file" 2>/dev/null

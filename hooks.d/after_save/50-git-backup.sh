@@ -157,6 +157,8 @@ if [ -z "$NO_REMOTE_NOTICE_AFTER" ] || [ "${NO_REMOTE_NOTICE_AFTER#*[!0-9]}" != 
     NO_REMOTE_NOTICE_AFTER=10
 fi
 
+RECONCILE_ENABLED=$(config '.git_reconcile.enabled' 'false')
+
 (
     [ "$GB_LOCK_STYLE" = "flock" ] || trap 'rm -f "$LOCK_FILE"' EXIT
 
@@ -222,12 +224,21 @@ fi
         _count=$((10#$_count + 1))
         echo "$_count" > "$REJECT_STATE_FILE" 2>/dev/null || true
 
-        log "git-backup" "ERROR: push REJECTED by the remote -- the backup has STOPPED for $SLUG and will not resume on its own (consecutive rejections: $_count). git rejected: ${_rejected%;}. The commit exists on this machine only. Nothing here will fetch, merge or rebase for you: run 'git -C ${_dq}$REPO_ROOT${_dq} push' to see git's own advice and resolve it by hand -- recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently."
+        if [ "$RECONCILE_ENABLED" = "true" ]; then
+            log "git-backup" "ERROR: push REJECTED by the remote -- the backup has STOPPED for $SLUG (consecutive rejections: $_count). git_reconcile.enabled is on, but 60-git-reconcile.sh is hard-disabled pending #969, so nothing will fetch, rebase or push this automatically right now. git rejected: ${_rejected%;}. The commit exists on this machine only. Run 'git -C ${_dq}$REPO_ROOT${_dq} push' to see git's own advice -- recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently."
+        else
+            log "git-backup" "ERROR: push REJECTED by the remote -- the backup has STOPPED for $SLUG and will not resume on its own (consecutive rejections: $_count). git rejected: ${_rejected%;}. The commit exists on this machine only. Nothing here will fetch, merge or rebase for you: run 'git -C ${_dq}$REPO_ROOT${_dq} push' to see git's own advice and resolve it by hand -- recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently."
+        fi
 
         if [ "$REJECT_NOTICE_AFTER" -gt 0 ] && [ "$_count" -eq "$REJECT_NOTICE_AFTER" ]; then
             mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
-            printf '%s\n' "remember: git backup has STOPPED. The remote rejected the last $_count pushes from $REPO_ROOT and will not accept them on a retry -- memory is still being committed locally, but it is not reaching your backup remote. Run: git -C ${_dq}$REPO_ROOT${_dq} push -- then resolve the divergence yourself. Nothing will be merged or rebased for you." \
-                > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
+            if [ "$RECONCILE_ENABLED" = "true" ]; then
+                printf '%s\n' "remember: git backup has STOPPED for now. The remote rejected the last $_count pushes from $REPO_ROOT -- memory is still being committed locally, but it is not reaching your backup remote yet. git_reconcile.enabled is on, but 60-git-reconcile.sh is hard-disabled pending #969, so nothing will fetch, rebase or push this automatically right now. Run: git -C ${_dq}$REPO_ROOT${_dq} push -- to see git's own advice." \
+                    > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
+            else
+                printf '%s\n' "remember: git backup has STOPPED. The remote rejected the last $_count pushes from $REPO_ROOT and will not accept them on a retry -- memory is still being committed locally, but it is not reaching your backup remote. Run: git -C ${_dq}$REPO_ROOT${_dq} push -- then resolve the divergence yourself. Nothing will be merged or rebased for you." \
+                    > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
+            fi
         fi
         return 0
     }
@@ -245,18 +256,18 @@ fi
             printf '%s\n' "$_gb_rule" >> "$GB_EXCLUDE_FILE" 2>/dev/null || true
         done
     else
-        report_error "git-backup" "WARNING: could not create $BACKUP_COMMON_DIR/info -- the logs/tmp/config.json exclusion was NOT written, so this backup's git add may stage config.json (which can carry haiku.oauth_token)"
+        report_error "git-backup" "WARNING: could not create $BACKUP_COMMON_DIR/info -- the logs/tmp/config.json exclusion was NOT written, so this backup's git add may stage config.json"
     fi
 
     if [ -n "$(git -C "$REPO_ROOT" ls-files -- "$SLUG/logs/" "$SLUG/tmp/" "$SLUG/config.json" 2>/dev/null | head -n 1)" ]; then
         if ! git -C "$REPO_ROOT" diff --cached --quiet 2>/dev/null; then
-            log "git-backup" "$SLUG/logs, $SLUG/tmp or $SLUG/config.json are tracked by a version older than the exclusion, but this store has staged changes in its index -- untracking them would commit those too, so it is left for the next backup."
+            log "git-backup" "$SLUG/logs, $SLUG/tmp or $SLUG/config.json are tracked by a version older than the exclusion, but this store has staged changes in its index -- untracking them would commit those too, so it is left for the next backup. If that config.json ever held the old haiku sign-in setting (retired in #860), it is already in this store's git history regardless of when the untrack commit lands -- treat that value as exposed and rotate it (make a new one, the way the old one was made)."
         elif git -C "$REPO_ROOT" rm -r -q --cached --ignore-unmatch -- "$SLUG/logs/" "$SLUG/tmp/" "$SLUG/config.json" 2>/dev/null \
             && _gb_commit_untrack >/dev/null 2>&1; then
-            log "git-backup" "untracked $SLUG/logs, $SLUG/tmp and $SLUG/config.json -- a version older than the exclusion had committed them. They stop being pushed from now on; commits that already carry them are left untouched, because removing those means rewriting history and force-pushing, which breaks every other clone of this store. If config.json carried a live haiku.oauth_token, treat that credential as compromised and rotate it."
+            log "git-backup" "untracked $SLUG/logs, $SLUG/tmp and $SLUG/config.json -- a version older than the exclusion had committed them. They stop being pushed from now on; commits that already carry them are left untouched, because removing those means rewriting history and force-pushing, which breaks every other clone of this store. If that config.json ever held the old haiku sign-in setting, treat that value as exposed and rotate it (make a new one, the way the old one was made) -- claude.ai itself may still accept the old value even though this plugin no longer reads it (#860), and anyone with access to this store's git history can still see it."
         else
             git -C "$REPO_ROOT" reset -q 2>/dev/null || true
-            log "git-backup" "could not untrack $SLUG/logs, $SLUG/tmp or $SLUG/config.json; the index was restored and the next backup retries."
+            log "git-backup" "could not untrack $SLUG/logs, $SLUG/tmp or $SLUG/config.json; the index was restored and the next backup retries. If that config.json ever held the old haiku sign-in setting, it is already in this store's git history regardless of whether this untrack attempt ever succeeds -- treat that value as exposed and rotate it (make a new one, the way the old one was made) -- claude.ai itself may still accept the old value even though this plugin no longer reads it (#860), and anyone with access to this store's git history can still see it."
         fi
     fi
 

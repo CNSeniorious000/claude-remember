@@ -9,6 +9,14 @@ source "$_REMEMBER_SRC_DIR/lib-slug.sh"
 unset _REMEMBER_SRC_DIR
 
 
+_lmd_warn() {
+    if declare -F report_error >/dev/null 2>&1; then
+        report_error "lib-memory-dir" "$1"
+    else
+        printf '%s\n' "[lib-memory-dir] WARNING: $1" >&2
+    fi
+}
+
 _read_data_dir() {
     local cfg="$1"
     [ -f "$cfg" ] || return 0
@@ -51,7 +59,7 @@ _resolve_memory_project_dir() {
 }
 
 _resolve_remember_dir() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local data_dir="$1"
     local proj="$2"
 
@@ -67,7 +75,7 @@ _resolve_remember_dir() {
 }
 
 _set_store_root() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local data_dir="$1" prefix
     REMEMBER_STORE_ROOT=""
 
@@ -124,7 +132,7 @@ export REMEMBER_STORE_ROOT
 _project_cfg="${REMEMBER_DIR}/config.json"
 
 _classify_project_cfg_haiku_trust() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     if [ "${_data_dir_raw#/}" != "$_data_dir_raw" ] || [ "${_data_dir_raw#[~]}" != "$_data_dir_raw" ] \
         || [ "${_data_dir_raw#[A-Za-z]:[/\\]}" != "$_data_dir_raw" ]; then
         _project_cfg_haiku_untrusted=0
@@ -196,7 +204,7 @@ if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then
     if [ "$_project_cfg_tracked_answer" = untracked ]; then
         _project_cfg_model_reject_untrusted=0
     else
-        _project_cfg_model_reject_untrusted=1  # tracked or could-not-tell -> fail CLOSED
+        _project_cfg_model_reject_untrusted=1
     fi
     unset _project_cfg_tracked_answer
 fi
@@ -232,11 +240,7 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
             if [ -n "$_project_sanitized_tmp" ] && jq -c "del($_project_del_filter)" "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then
                 _jq_merge_sources+=("$_project_sanitized_tmp")
             else
-                if declare -F report_error >/dev/null 2>&1; then
-                    report_error "lib-memory-dir" "sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies"
-                else
-                    printf '%s\n' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies" >&2
-                fi
+                _lmd_warn "sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies"
                 [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
                 _project_sanitized_tmp=""
             fi
@@ -260,40 +264,19 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     _project_drop_marker=$(mktemp "${SYS_TMPDIR}/remember-config-drop-marker-XXXXXX" 2>/dev/null) || _project_drop_marker=""
     rm -f "$_project_drop_marker" 2>/dev/null
     _py_merge_rc=0
-    _lmd_run_python() {
-        if [ "${PYTHON:-python3}" = python3 ]; then
-            python3 "$@"
-        elif [ "${PYTHON:-python3}" = python ]; then
-            python "$@"
-        elif [ "${PYTHON:-python3}" = "py -3" ]; then
-            py -3 "$@"
-        elif [ "${PYTHON:-python3}" = py ]; then
-            py "$@"
-        else
-            return 127
-        fi
-    }
     _lmd_py_dir="${BASH_SOURCE[0]%/*}"
     [ "$_lmd_py_dir" = "${BASH_SOURCE[0]}" ] && _lmd_py_dir="$(pwd)"
-    _lmd_run_python "$_lmd_py_dir/cfg_merge.py" "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 || _py_merge_rc=$?
+    _remember_slug_run_python "$_lmd_py_dir/cfg_merge.py" "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 || _py_merge_rc=$?
     unset _lmd_py_dir
     if [ "$_py_merge_rc" != "0" ] && [ "$_py_merge_rc" != "3" ] && [ "$_py_merge_rc" != "4" ] && [ "$_py_merge_rc" != "5" ]; then
         cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
     fi
     if { [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; } || [ "$_py_merge_rc" = "3" ] || [ "$_py_merge_rc" = "5" ]; then
         rm -f "$_project_drop_marker" 2>/dev/null
-        if declare -F report_error >/dev/null 2>&1; then
-            report_error "lib-memory-dir" "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"
-        else
-            printf '%s\n' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies" >&2
-        fi
+        _lmd_warn "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"
     fi
     if [ "$_py_merge_rc" = "4" ] || [ "$_py_merge_rc" = "5" ]; then
-        if declare -F report_error >/dev/null 2>&1; then
-            report_error "lib-memory-dir" "sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied"
-        else
-            printf '%s\n' "[lib-memory-dir] WARNING: sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied" >&2
-        fi
+        _lmd_warn "sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied"
     fi
     [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null
 else

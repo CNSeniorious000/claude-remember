@@ -71,10 +71,8 @@ claude_projects_dir() {
 }
 
 _remember_should_check_utf8() {
-    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] && return 0
     local _os="${OSTYPE:-}"
-    [ "${_os#linux}" != "$_os" ] && return 0
-    return 1
+    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] || [ "${_os#linux}" != "$_os" ]
 }
 
 _REMEMBER_DRIVE_UPPER="ABCDEFGHIJKLMNOPQRSTUVWXYZ"
