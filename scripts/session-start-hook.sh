@@ -125,11 +125,30 @@ _remember_hook_clock_into _REMEMBER_HOOK_T0
 # bytes: milliseconds even at that rate. And the compiled hook sits 37 bytes
 # under the 120 KiB release budget (check_release_tree.py), which the inlined
 # library (about 1.2 KB) would break.
+#
+# #1047: "a few hundred bytes: milliseconds even at that rate" is a claim about
+# a payload the host chooses, and nothing here enforced it. A host that hands
+# this hook its own transcript instead -- 6.8 MB was observed, on a child
+# `claude` whose fd 0 was the session jsonl -- made the hook's OWN extraction
+# quadratic, because `_stdin_json_string_into` starts with `${raw#*"$key"}`
+# and a leading `*` makes bash retry the matcher at every offset: 0.28 s at
+# 12.5 KB, 15.2 s at 100 KB, 4x per doubling, measured. The `case` one line
+# into that function is 2-6 ms on the same strings, so it is the `#` operator
+# and not pattern matching as such -- the same asymmetry lib-stdin.sh records
+# for the newline strip, and the same fix shape: bound the input instead of
+# making every consumer linear. Four extractions over 6.8 MB is hours, and a
+# single `${var#...}` builtin does not check for signals, so the hook could
+# not be stopped with SIGTERM either.
+#
+# One crop per side of the join, so the accumulator never exceeds 2 x 4096
+# whatever the host sends, and the four fields this hook wants are all inside
+# the first few hundred bytes. Under 4096 bytes the payload is byte-identical
+# to what the loop produced before.
 HOOK_STDIN=""
 if [ ! -t 0 ]; then
     _line=""
     while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
-        HOOK_STDIN="$HOOK_STDIN$_line"
+        HOOK_STDIN="${HOOK_STDIN:0:4096}${_line:0:4096}"
         _line=""
     done
 fi
