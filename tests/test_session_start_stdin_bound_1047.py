@@ -11,9 +11,7 @@ hands that whole string to `_stdin_json_string_into`, whose first real step is
 the pattern matcher at every offset. Measured for #1047 on bash 5.2.15, one
 synthetic string of n bytes with `"cwd"` at the end: 0.28 s at 12.5 KB, 0.95 s
 at 25 KB, 3.55 s at 50 KB, 15.2 s at 100 KB. `case x in *"cwd"*)` on the same
-strings is 2-6 ms, so it is the `#` operator, not pattern matching as such --
-the asymmetry `lib-stdin.sh` already records for the newline strip (165 s for
-1 MB).
+strings is 2-6 ms, so it is the `#` operator, not pattern matching as such.
 
 Nothing in the hook picks its stdin. The reporter's box had 27 of these hooks
 alive for 21 hours each, at 11% CPU, after child `claude` sessions (the harness
@@ -37,6 +35,14 @@ What the tests are evidence of:
   ceiling is huge on purpose: it is the bug's shape -- never finishing -- that
   it catches, not a duration. OBSERVED on macOS only; reasoned elsewhere, and
   stated as such rather than claimed.
+
+Every payload here is newline-terminated, the way a host sends one, and the
+sizes stay inside what bash 3.2 is observed to deliver: its `read -r -t 1`
+returns EMPTY -- not a partial line -- once a payload needs more than its
+second to fetch (measured here: a 16 KB single line arrives, a 64 KB one and
+any 8-line 131 KB one do not), so a larger fixture would leave the hook with no
+payload at all and turn the assertions into a test of that timeout. The 1 MB
+case therefore skips on bash 3.x instead of passing vacuously.
 """
 
 from __future__ import annotations
@@ -45,12 +51,20 @@ import json
 import os
 import stat
 import subprocess
-import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+import pytest
 
+from ._bash_runner import resolve_bash
+from .subprocess_helpers import subprocess_failure_detail
 from .test_path_resolution import _create_full_plugin_copy, _create_full_project
+
+# A real POSIX bash, never bare "bash": on windows-latest that commonly resolves
+# to the WSL launcher rather than Git Bash (#432).
+BASH = resolve_bash()
+pytestmark = pytest.mark.skipif(
+    BASH is None, reason="no usable bash on this host (#432)"
+)
 
 SESSION = "1047abcd-0000-4000-8000-000000001047"
 
@@ -59,101 +73,92 @@ SESSION = "1047abcd-0000-4000-8000-000000001047"
 CROP = 4096
 BOUND = 2 * CROP
 
-# A bound on a hang, not a measurement of anything.
-CEILING = 120
-
-# How long to wait for the deferred listener to write its two files. A bound on
-# a hang, not a measurement of anything.
-MARKER_TIMEOUT = 20
+# A bound on a hang, not a measurement of anything. The slowest case measured
+# here is about 1.5 s (1 MB through the line loop); the bug this catches does
+# not finish at all.
+CEILING = 20
 
 LISTENER = """#!/bin/bash
 # Test stub for hooks.d/before_session_start/ (tests/test_session_start_stdin_bound_1047.py).
 # The hook publishes the payload it consumed as a file; the size of that file is
 # what these tests assert on.
 cp "$REMEMBER_HOOK_STDIN_FILE" "$REMEMBER_TEST_STDIN_COPY"
-printf '%s' "$REMEMBER_HOOK_STDIN" > "$REMEMBER_TEST_STDIN_ENV"
 """
 
 
-def _setup(tmp_path: Path):
+def _bash_major() -> int:
+    out = subprocess.run(
+        [BASH, "-c", "echo ${BASH_VERSINFO[0]}"], capture_output=True, text=True
+    )
+    return int(out.stdout.strip() or 0)
+
+
+def _run(tmp_path: Path, payload: str) -> bytes:
     plugin = tmp_path / "plugin"
     project = tmp_path / "project"
     home = tmp_path / "home"
-    plugin.mkdir()
-    project.mkdir()
-    home.mkdir()
+    for d in (plugin, project, home):
+        d.mkdir()
     _create_full_plugin_copy(str(plugin))
     _create_full_project(str(project))
 
+    # Named `99-record-stdin.sh`, not `50-git-restore.sh`: the hook defers a
+    # LONE bundled listener (`& disown`, #660) and deletes the published file on
+    # its way out, which a deferred copy would race. A second, unknown listener
+    # keeps the dispatch in the foreground (#660's own condition), so the copy
+    # below is on disk by the time the hook exits and nothing here has to poll.
     listener = plugin / "hooks.d" / "before_session_start" / "99-record-stdin.sh"
     listener.write_text(LISTENER, encoding="utf-8")
     listener.chmod(listener.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    return plugin, project, home
 
-
-def _run(tmp_path: Path, payload: str):
-    plugin, project, home = _setup(tmp_path)
     copy = tmp_path / "stdin-copy"
-    env_file = tmp_path / "stdin-env"
     env = {
         **os.environ,
         "HOME": str(home),
         "CLAUDE_PROJECT_DIR": str(project),
         "CLAUDE_PLUGIN_ROOT": str(plugin),
         "REMEMBER_TEST_STDIN_COPY": str(copy),
-        "REMEMBER_TEST_STDIN_ENV": str(env_file),
     }
     env.pop("REMEMBER_NESTED_SUMMARIZER", None)
-    t0 = time.perf_counter()
     result = subprocess.run(
-        ["bash", str(plugin / "scripts" / "session-start-hook.sh")],
-        input=payload, env=env, capture_output=True, text=True,
+        [BASH, str(plugin / "scripts" / "session-start-hook.sh")],
+        input=payload.encode(), env=env, capture_output=True,
         timeout=CEILING, check=False,
     )
-    elapsed = time.perf_counter() - t0
-    assert result.returncode == 0, (
-        f"session-start-hook.sh exited {result.returncode}\n"
-        f"stdout: {result.stdout}\nstderr: {result.stderr}"
-    )
-    # Named `99-record-stdin.sh`, not `50-git-restore.sh`: the hook defers a
-    # LONE bundled listener (`& disown`, #660) and deletes the published file
-    # on its way out, so a deferred copy races the cleanup. An unknown script
-    # is dispatched in the foreground -- one of #660's own conditions -- and
-    # the poll below is only a bound.
-    deadline = time.time() + MARKER_TIMEOUT
-    while time.time() < deadline and not copy.is_file():
-        time.sleep(0.05)
+    remember = project / ".remember"
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
     assert copy.is_file(), (
-        f"the hooks.d listener never recorded the published payload\n"
-        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        "the hooks.d listener never recorded the published payload: "
+        + subprocess_failure_detail(result, remember)
     )
-    return copy.read_bytes(), env_file.read_bytes(), elapsed
+    return copy.read_bytes()
 
 
-def _payload(**over) -> str:
-    body = {
+def _payload() -> str:
+    return json.dumps({
         "session_id": SESSION,
         "transcript_path": f"/does/not/matter/{SESSION}.jsonl",
         "hook_event_name": "SessionStart",
         "source": "startup",
         "cwd": "/does/not/matter",
-    }
-    body.update(over)
-    return json.dumps(body)
+    }) + "\n"
 
 
 def test_a_64_kb_stdin_is_cropped_before_the_hook_publishes_it(tmp_path):
     """Over the crop, the payload the extractors see must stay bounded.
 
     Would this test still pass if the code did nothing? No: the hook used to
-    keep every byte it read, so the published copy was the payload -- 65,607
+    keep every byte it read, so the published copy was the payload -- 16,419
     bytes here, against the 8,192 bound. Nothing else in the hook looks at its
     size.
-    """
-    payload = '{"session_id":"' + SESSION + '","pad":"' + "x" * 65536 + '","cwd":"/does/not/matter"}'
-    copy, env_stdin, _ = _run(tmp_path, payload)
 
-    assert len(payload) > BOUND, "fixture is not over the bound"
+    16 KB and not more: on bash 3.2 a payload past roughly this size is not
+    delivered to the loop at all (see the module docstring), which would leave
+    the hook with nothing to crop and the test green for the wrong reason.
+    """
+    payload = '{"session_id":"' + SESSION + '","pad":"' + "x" * 16384 + '","cwd":"/does/not/matter"}' + "\n"
+    copy = _run(tmp_path, payload)
+
     assert len(copy) <= BOUND, (
         f"the hook published a {len(copy)}-byte payload; the bound is {BOUND}"
     )
@@ -167,28 +172,34 @@ def test_a_real_payload_arrives_byte_for_byte(tmp_path):
     past its own bound.
     """
     payload = _payload()
-    copy, env_stdin, _ = _run(tmp_path, payload)
+    copy = _run(tmp_path, payload)
 
     assert len(payload) <= CROP, "fixture is not under the crop"
-    assert copy == payload.encode(), (
+    # The hook strips line terminators, as it always has (#1040): what arrives
+    # is the payload without its trailing newline, and nothing else changes.
+    assert copy == payload[:-1].encode(), (
         f"a {len(payload)}-byte payload arrived as {len(copy)} bytes: {copy[:200]!r}"
-    )
-    assert env_stdin == payload.encode(), (
-        "the payload in REMEMBER_HOOK_STDIN is not the one in the file"
     )
 
 
 def test_a_transcript_sized_stdin_does_not_hang_the_hook(tmp_path):
-    """The reported shape: one 1 MB line, the key at the end of it.
+    """The reported shape: a transcript-sized payload, the key at the end of it.
 
     Before the fix this does not finish in any wall clock a session survives:
-    the strip to `"cwd"` alone is (1 MB / 100 KB)^2 * 15.2 s. The ceiling is
-    the assertion -- this test is about hanging, not about speed.
-    """
-    payload = '{"type":"queue-operation","pad":"' + "y" * (1 << 20) + '","cwd":"/does/not/matter"}'
-    copy, _, elapsed = _run(tmp_path, payload)
+    the strip to `"cwd"` alone is (1 MB / 100 KB)^2 * 15.2 s. `CEILING` is the
+    assertion -- this test is about hanging, not about speed.
 
-    assert elapsed < CEILING, f"took {elapsed:.1f}s"
+    64 lines of 16 KB rather than one of 1 MB: bash 3.2 cannot deliver a
+    line that large (see the module docstring), so this pairs with a skip on
+    that bash rather than passing vacuously. 64 lines also exercises the other
+    quadratic this fix closes -- the join.
+    """
+    if _bash_major() < 4:
+        pytest.skip("bash 3.2 delivers at most ~16 KB through `read -r -t 1`; see the module docstring")
+    line = '"pad":"' + "y" * 16384 + '"'
+    payload = '{"type":"queue-operation",' + ",".join([line] * 64) + ',"cwd":"/does/not/matter"}' + "\n"
+    copy = _run(tmp_path, payload)
+
     assert len(copy) <= BOUND, (
         f"the hook published a {len(copy)}-byte payload; the bound is {BOUND}"
     )
